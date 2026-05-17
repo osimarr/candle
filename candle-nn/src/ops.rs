@@ -203,6 +203,15 @@ impl candle::CustomOp1 for Sigmoid {
         Ok((new_storage, layout.shape().clone()))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        storage: &candle::RocmStorage,
+        layout: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        storage.sigmoid(layout)
+    }
+
     fn bwd(&self, _arg: &Tensor, res: &Tensor, grad_res: &Tensor) -> Result<Option<Tensor>> {
         // d/dx sigmoid(x) = (1 - sigmoid(x)) * sigmoid(x)
         let d_dx_sigmoid = res.ones_like()?.sub(res)?.mul(res)?;
@@ -424,6 +433,15 @@ impl candle::CustomOp1 for SoftmaxLastDim {
             candle::MetalStorage::new(output, device.clone(), elem_count, storage.dtype());
         Ok((newstorage, layout.shape().clone()))
     }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        storage: &candle::RocmStorage,
+        layout: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        storage.softmax_last_dim(layout)
+    }
 }
 
 pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
@@ -616,6 +634,17 @@ impl candle::CustomOp2 for RmsNorm {
         .map_err(candle::Error::wrap)?;
         let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
         Ok((newstorage, l1.shape().clone()))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        s1: &candle::RocmStorage,
+        l1: &Layout,
+        s2: &candle::RocmStorage,
+        l2: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        s1.rms_norm(l1, s2, l2, self.eps)
     }
 }
 
@@ -863,6 +892,19 @@ impl candle::CustomOp3 for LayerNorm {
         .map_err(candle::Error::wrap)?;
         let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
         Ok((newstorage, l1.shape().clone()))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        s1: &candle::RocmStorage,
+        l1: &Layout,
+        s2: &candle::RocmStorage,
+        l2: &Layout,
+        s3: &candle::RocmStorage,
+        l3: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        s1.layer_norm(l1, s2, l2, s3, l3, self.eps)
     }
 }
 

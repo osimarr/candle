@@ -34,6 +34,20 @@ __device__ float unary_value(int op, float value) {
         return sqrtf(value);
     case 14:
         return tanhf(value);
+    case 15:
+        return value / (1.0f + expf(-value));
+    case 16:
+        return 0.5f * value *
+               (1.0f + tanhf(0.7978845608028654f * value *
+                              (1.0f + 0.044715f * value * value)));
+    case 17:
+        return erff(value);
+    case 18:
+        return 0.5f * value * (1.0f + erff(value * 0.7071067811865475f));
+    case 19:
+        return (0.0f < value) - (value < 0.0f);
+    case 20:
+        return 1.0f / (1.0f + expf(-value));
     default:
         return value;
     }

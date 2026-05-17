@@ -223,6 +223,19 @@ impl candle::CustomOp3 for RotaryEmbI {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        src: &candle::RocmStorage,
+        l_src: &Layout,
+        cos: &candle::RocmStorage,
+        l_cos: &Layout,
+        sin: &candle::RocmStorage,
+        l_sin: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        src.rope(l_src, cos, l_cos, sin, l_sin, true)
+    }
 }
 
 fn rope_check_cs(cs: &Tensor, b_sz: usize) -> Result<(usize, usize)> {
@@ -507,6 +520,19 @@ impl candle::CustomOp3 for RotaryEmb {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        src: &candle::RocmStorage,
+        l_src: &Layout,
+        cos: &candle::RocmStorage,
+        l_cos: &Layout,
+        sin: &candle::RocmStorage,
+        l_sin: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        src.rope(l_src, cos, l_cos, sin, l_sin, false)
+    }
 }
 
 pub fn rope(xs: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
@@ -777,6 +803,19 @@ impl candle::CustomOp3 for RotaryEmbThd {
         .map_err(candle::Error::wrap)?;
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        src: &candle::RocmStorage,
+        l_src: &Layout,
+        cos: &candle::RocmStorage,
+        l_cos: &Layout,
+        sin: &candle::RocmStorage,
+        l_sin: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        src.rope_thd(l_src, cos, l_cos, sin, l_sin)
     }
 }
 

@@ -148,6 +148,23 @@ impl crate::CustomOp1 for ArgSort {
         Ok((sort_indexes, layout.shape().into()))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        storage: &crate::RocmStorage,
+        layout: &crate::Layout,
+    ) -> Result<(crate::RocmStorage, crate::Shape)> {
+        use crate::backend::{BackendDevice, BackendStorage};
+
+        if let Some(output) = storage.try_arg_sort(layout, self.asc, self.last_dim)? {
+            return Ok(output);
+        }
+        let device = storage.device().clone();
+        let (storage, shape) = self.cpu_fwd(&storage.to_cpu_storage()?, layout)?;
+        let storage = device.storage_from_cpu_storage_owned(storage)?;
+        Ok((storage, shape))
+    }
+
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,

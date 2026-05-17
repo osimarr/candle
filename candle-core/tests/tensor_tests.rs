@@ -1777,7 +1777,13 @@ test_device!(
     ternary_op_metal,
     ternary_op_rocm
 );
-test_device!(embeddings, embeddings_cpu, embeddings_gpu, embeddings_metal);
+test_device!(
+    embeddings,
+    embeddings_cpu,
+    embeddings_gpu,
+    embeddings_metal,
+    embeddings_rocm
+);
 test_device!(cmp, cmp_cpu, cmp_gpu, cmp_metal, cmp_rocm);
 test_device!(
     broadcasting,
@@ -1790,7 +1796,8 @@ test_device!(
     index_select,
     index_select_cpu,
     index_select_gpu,
-    index_select_metal
+    index_select_metal,
+    index_select_rocm
 );
 test_device!(
     index_add,
@@ -1816,8 +1823,14 @@ test_device!(
 );
 test_device!(randn, randn_cpu, randn_gpu, randn_metal, randn_rocm);
 test_device!(clamp, clamp_cpu, clamp_gpu, clamp_metal, clamp_rocm);
-test_device!(asort, asort_cpu, asort_gpu, asort_metal);
-test_device!(asort_big, asort_big_cpu, asort_big_gpu, asort_big_metal);
+test_device!(asort, asort_cpu, asort_gpu, asort_metal, asort_rocm);
+test_device!(
+    asort_big,
+    asort_big_cpu,
+    asort_big_gpu,
+    asort_big_metal,
+    asort_big_rocm
+);
 test_device!(var, var_cpu, var_gpu, var_metal, var_rocm);
 test_device!(
     zero_dim,

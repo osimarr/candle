@@ -204,6 +204,216 @@ impl RocmStorage {
         Self::from_buffer(buffer, dst.clone(), self.dtype, self.elem_count, "transfer")
     }
 
+    pub fn softmax_last_dim(&self, layout: &Layout) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "softmax-last-dim")?;
+        let mut op = self.op1(
+            "softmax-last-dim",
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_softmax_last_dim(&op).map_err(Error::from)? {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "softmax-last-dim",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "softmax-last-dim").bt())
+    }
+
+    pub fn sigmoid(&self, layout: &Layout) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "sigmoid")?;
+        let mut op = self.op1(
+            "sigmoid",
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_unary(&op).map_err(Error::from)? {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "sigmoid",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "sigmoid").bt())
+    }
+
+    pub fn rms_norm(
+        &self,
+        layout: &Layout,
+        alpha: &Self,
+        alpha_layout: &Layout,
+        eps: f32,
+    ) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "rms-norm")?;
+        ensure_f32(alpha.dtype, "rms-norm")?;
+        let mut op = self.op2(
+            "rms-norm",
+            alpha,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(layout)?);
+        op.rhs_layout = Some(kernel_layout(alpha_layout)?);
+        if let Some(buffer) = kernels::tensor::try_rms_norm(&op, eps).map_err(Error::from)? {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "rms-norm",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "rms-norm").bt())
+    }
+
+    pub fn layer_norm(
+        &self,
+        layout: &Layout,
+        alpha: &Self,
+        alpha_layout: &Layout,
+        beta: &Self,
+        beta_layout: &Layout,
+        eps: f32,
+    ) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "layer-norm")?;
+        ensure_f32(alpha.dtype, "layer-norm")?;
+        ensure_f32(beta.dtype, "layer-norm")?;
+        let op = self.op3(
+            "layer-norm",
+            alpha,
+            beta,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        let src_l = kernel_layout(layout)?;
+        let alpha_l = kernel_layout(alpha_layout)?;
+        let beta_l = kernel_layout(beta_layout)?;
+        if let Some(buffer) = kernels::tensor::try_layer_norm(&op, &src_l, &alpha_l, &beta_l, eps)
+            .map_err(Error::from)?
+        {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "layer-norm",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "layer-norm").bt())
+    }
+
+    pub fn rope(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        interleaved: bool,
+    ) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "rotary-emb")?;
+        ensure_f32(cos.dtype, "rotary-emb")?;
+        ensure_f32(sin.dtype, "rotary-emb")?;
+        let op = self.op3(
+            if interleaved {
+                "rotary-emb-int"
+            } else {
+                "rotary-emb"
+            },
+            cos,
+            sin,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        let src_l = kernel_layout(layout)?;
+        let cos_l = kernel_layout(cos_layout)?;
+        let sin_l = kernel_layout(sin_layout)?;
+        if let Some(buffer) =
+            kernels::tensor::try_rope(&op, &src_l, &cos_l, &sin_l, interleaved, false)
+                .map_err(Error::from)?
+        {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "rotary-emb",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "rotary-emb").bt())
+    }
+
+    pub fn rope_thd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+    ) -> Result<(Self, Shape)> {
+        ensure_f32(self.dtype, "rotary-emb")?;
+        ensure_f32(cos.dtype, "rotary-emb")?;
+        ensure_f32(sin.dtype, "rotary-emb")?;
+        let op = self.op3(
+            "rotary-emb",
+            cos,
+            sin,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        let src_l = kernel_layout(layout)?;
+        let cos_l = kernel_layout(cos_layout)?;
+        let sin_l = kernel_layout(sin_layout)?;
+        if let Some(buffer) = kernels::tensor::try_rope(&op, &src_l, &cos_l, &sin_l, false, true)
+            .map_err(Error::from)?
+        {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "rotary-emb",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        Err(Error::UnsupportedDTypeForOp(self.dtype, "rotary-emb").bt())
+    }
+
+    pub(crate) fn try_arg_sort(
+        &self,
+        layout: &Layout,
+        asc: bool,
+        last_dim: usize,
+    ) -> Result<Option<(Self, Shape)>> {
+        if self.dtype != DType::F32 {
+            return Ok(None);
+        }
+        let mut op = self.op1(
+            "argsort",
+            Some(kernel_output_for_layout(layout, DType::U32)?),
+        )?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        let Some(buffer) =
+            kernels::tensor::try_arg_sort(&op, asc, last_dim).map_err(Error::from)?
+        else {
+            return Ok(None);
+        };
+        let storage = Self::from_buffer(
+            buffer,
+            self.device.clone(),
+            DType::U32,
+            layout.shape().elem_count(),
+            "argsort",
+        )?;
+        Ok(Some((storage, layout.shape().clone())))
+    }
+
     pub(crate) fn custom_op1<F>(
         &self,
         l: &Layout,
@@ -438,6 +648,24 @@ fn kernel_layout(layout: &Layout) -> Result<kernels::LayoutArg> {
     .map_err(Error::from)
 }
 
+fn reduce_output_elem_count(layout: &Layout, dims: &[usize]) -> usize {
+    let mut out_dims = layout.shape().dims().to_vec();
+    for &dim in dims {
+        if dim < out_dims.len() {
+            out_dims[dim] = 1;
+        }
+    }
+    out_dims.iter().product()
+}
+
+fn index_select_output_elem_count(layout: &Layout, ids_l: &Layout, dim: usize) -> usize {
+    let mut out_dims = layout.shape().dims().to_vec();
+    if dim < out_dims.len() {
+        out_dims[dim] = ids_l.shape().elem_count();
+    }
+    out_dims.iter().product()
+}
+
 fn kernel_scalar(scalar: crate::scalar::Scalar) -> Result<kernels::KernelScalar> {
     match scalar {
         crate::scalar::Scalar::F32(value) => Ok(kernels::KernelScalar::F32(value)),
@@ -635,10 +863,20 @@ impl BackendStorage for RocmStorage {
     type Device = RocmDevice;
 
     fn try_clone(&self, layout: &Layout) -> Result<Self> {
-        let op = self.op1(
+        let mut op = self.op1(
             "try_clone",
             Some(kernel_output_for_layout(layout, self.dtype)?),
         )?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_clone(&op).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                self.dtype,
+                layout.shape().elem_count(),
+                "try_clone",
+            );
+        }
         let storage = kernels::tensor::call_try_clone(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.try_clone(layout)
@@ -663,10 +901,22 @@ impl BackendStorage for RocmStorage {
     }
 
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
-        let op = self.op1(
+        let mut op = self.op1(
             "affine",
             Some(kernel_output_for_layout(layout, DType::F32)?),
         )?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) =
+            kernels::tensor::try_affine(&op, mul as f32, add as f32).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "affine",
+            );
+        }
         let storage = kernels::tensor::call_affine(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.affine(layout, mul, add)
@@ -675,7 +925,17 @@ impl BackendStorage for RocmStorage {
     }
 
     fn powf(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let op = self.op1("powf", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        let mut op = self.op1("powf", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_powf(&op, alpha as f32).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "powf",
+            );
+        }
         let storage = kernels::tensor::call_powf(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.powf(layout, alpha)
@@ -684,7 +944,17 @@ impl BackendStorage for RocmStorage {
     }
 
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let op = self.op1("elu", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        let mut op = self.op1("elu", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_elu(&op, alpha as f32).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "elu",
+            );
+        }
         let storage = kernels::tensor::call_elu(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.elu(layout, alpha)
@@ -693,12 +963,32 @@ impl BackendStorage for RocmStorage {
     }
 
     fn reduce_op(&self, op: ReduceOp, layout: &Layout, dims: &[usize]) -> Result<Self> {
-        let kernel_op = self.op1(op.name(), None)?;
+        let output_dtype = match op {
+            ReduceOp::ArgMin | ReduceOp::ArgMax => DType::U32,
+            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max => DType::F32,
+        };
+        let mut kernel_op = self.op1(
+            op.name(),
+            Some(kernel_output(
+                output_dtype,
+                reduce_output_elem_count(layout, dims),
+            )?),
+        )?;
+        kernel_op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_reduce(&kernel_op, dims).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                output_dtype,
+                reduce_output_elem_count(layout, dims),
+                op.name(),
+            );
+        }
         let storage = kernels::tensor::call_reduce(kernel_op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.reduce_op(op, layout, dims)
         })?;
-        Self::wrap_f32(storage, self.device.clone(), op.name())
+        Self::wrap(storage, self.device.clone(), op.name())
     }
 
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_l: &Layout, rhs_l: &Layout) -> Result<Self> {
@@ -727,7 +1017,17 @@ impl BackendStorage for RocmStorage {
     }
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
-        let op = self.op1("to_dtype", Some(kernel_output_for_layout(layout, dtype)?))?;
+        let mut op = self.op1("to_dtype", Some(kernel_output_for_layout(layout, dtype)?))?;
+        op.input_layout = Some(kernel_layout(layout)?);
+        if let Some(buffer) = kernels::tensor::try_to_dtype(&op).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                dtype,
+                layout.shape().elem_count(),
+                "to_dtype",
+            );
+        }
         let storage = kernels::tensor::call_to_dtype(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.to_dtype(layout, dtype)
@@ -798,6 +1098,20 @@ impl BackendStorage for RocmStorage {
             f,
             Some(kernel_output_for_layout(layout, DType::F32)?),
         )?;
+        let cond_l = kernel_layout(layout)?;
+        let true_l = kernel_layout(t_l)?;
+        let false_l = kernel_layout(f_l)?;
+        if let Some(buffer) =
+            kernels::tensor::try_where_cond(&op, &cond_l, &true_l, &false_l).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "where",
+            );
+        }
         let storage = kernels::tensor::call_where_cond(op, || {
             let cond = self.to_cpu_storage_impl()?;
             let t = t.to_cpu_storage_impl()?;
@@ -814,7 +1128,33 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
-        let op = self.op2("conv1d", kernel, None)?;
+        let l_out = params.l_out();
+        let elem_count = params.b_size * params.c_out * l_out;
+        let mut op = self.op2(
+            "conv1d",
+            kernel,
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(kernel_l)?);
+        let kernel_params = kernels::tensor::Conv1dParams {
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+            l_out,
+            elem_count,
+        };
+        if let Some(buffer) =
+            kernels::tensor::try_conv1d(&op, kernel_params).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "conv1d",
+            );
+        }
         let storage = kernels::tensor::call_conv1d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
@@ -830,7 +1170,33 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConvTranspose1D,
     ) -> Result<Self> {
-        let op = self.op2("conv_transpose1d", kernel, None)?;
+        let l_out = params.l_out();
+        let elem_count = params.b_size * params.c_out * l_out;
+        let mut op = self.op2(
+            "conv_transpose1d",
+            kernel,
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(kernel_l)?);
+        let kernel_params = kernels::tensor::Conv1dParams {
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+            l_out,
+            elem_count,
+        };
+        if let Some(buffer) =
+            kernels::tensor::try_conv_transpose1d(&op, kernel_params).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "conv_transpose1d",
+            );
+        }
         let storage = kernels::tensor::call_conv_transpose1d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
@@ -846,7 +1212,34 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
-        let op = self.op2("conv2d", kernel, None)?;
+        let (out_h, out_w) = (params.out_h(), params.out_w());
+        let elem_count = params.b_size * params.c_out * out_h * out_w;
+        let mut op = self.op2(
+            "conv2d",
+            kernel,
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(kernel_l)?);
+        let kernel_params = kernels::tensor::Conv2dParams {
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+            out_h,
+            out_w,
+            elem_count,
+        };
+        if let Some(buffer) =
+            kernels::tensor::try_conv2d(&op, kernel_params).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "conv2d",
+            );
+        }
         let storage = kernels::tensor::call_conv2d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
@@ -862,7 +1255,34 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConvTranspose2D,
     ) -> Result<Self> {
-        let op = self.op2("conv_transpose2d", kernel, None)?;
+        let (out_h, out_w) = (params.out_h(), params.out_w());
+        let elem_count = params.b_size * params.c_out * out_h * out_w;
+        let mut op = self.op2(
+            "conv_transpose2d",
+            kernel,
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(kernel_l)?);
+        let kernel_params = kernels::tensor::Conv2dParams {
+            padding: params.padding,
+            stride: params.stride,
+            dilation: params.dilation,
+            out_h,
+            out_w,
+            elem_count,
+        };
+        if let Some(buffer) =
+            kernels::tensor::try_conv_transpose2d(&op, kernel_params).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "conv_transpose2d",
+            );
+        }
         let storage = kernels::tensor::call_conv_transpose2d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
@@ -877,7 +1297,24 @@ impl BackendStorage for RocmStorage {
         kernel: (usize, usize),
         stride: (usize, usize),
     ) -> Result<Self> {
-        let op = self.op1("avg_pool2d", None)?;
+        let dims = l.dims();
+        let elem_count = dims[0]
+            * dims[1]
+            * ((dims[2] - kernel.0) / stride.0 + 1)
+            * ((dims[3] - kernel.1) / stride.1 + 1);
+        let mut op = self.op1("avg_pool2d", Some(kernel_output(DType::F32, elem_count)?))?;
+        op.input_layout = Some(kernel_layout(l)?);
+        if let Some(buffer) =
+            kernels::tensor::try_pool2d(&op, kernel, stride, false).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "avg_pool2d",
+            );
+        }
         let storage = kernels::tensor::call_avg_pool2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.avg_pool2d(l, kernel, stride)
@@ -891,7 +1328,24 @@ impl BackendStorage for RocmStorage {
         kernel: (usize, usize),
         stride: (usize, usize),
     ) -> Result<Self> {
-        let op = self.op1("max_pool2d", None)?;
+        let dims = l.dims();
+        let elem_count = dims[0]
+            * dims[1]
+            * ((dims[2] - kernel.0) / stride.0 + 1)
+            * ((dims[3] - kernel.1) / stride.1 + 1);
+        let mut op = self.op1("max_pool2d", Some(kernel_output(DType::F32, elem_count)?))?;
+        op.input_layout = Some(kernel_layout(l)?);
+        if let Some(buffer) =
+            kernels::tensor::try_pool2d(&op, kernel, stride, true).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "max_pool2d",
+            );
+        }
         let storage = kernels::tensor::call_max_pool2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.max_pool2d(l, kernel, stride)
@@ -900,7 +1354,24 @@ impl BackendStorage for RocmStorage {
     }
 
     fn upsample_nearest1d(&self, l: &Layout, size: usize) -> Result<Self> {
-        let op = self.op1("upsample_nearest1d", Some(kernel_output(DType::F32, size)?))?;
+        let dims = l.dims();
+        let elem_count = dims[0] * dims[1] * size;
+        let mut op = self.op1(
+            "upsample_nearest1d",
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.input_layout = Some(kernel_layout(l)?);
+        if let Some(buffer) =
+            kernels::tensor::try_upsample_nearest1d(&op, size).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "upsample_nearest1d",
+            );
+        }
         let storage = kernels::tensor::call_upsample_nearest1d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_nearest1d(l, size)
@@ -909,7 +1380,24 @@ impl BackendStorage for RocmStorage {
     }
 
     fn upsample_nearest2d(&self, l: &Layout, h: usize, w: usize) -> Result<Self> {
-        let op = self.op1("upsample_nearest2d", None)?;
+        let dims = l.dims();
+        let elem_count = dims[0] * dims[1] * h * w;
+        let mut op = self.op1(
+            "upsample_nearest2d",
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.input_layout = Some(kernel_layout(l)?);
+        if let Some(buffer) =
+            kernels::tensor::try_upsample_nearest2d(&op, h, w).map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "upsample_nearest2d",
+            );
+        }
         let storage = kernels::tensor::call_upsample_nearest2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_nearest2d(l, h, w)
@@ -926,7 +1414,25 @@ impl BackendStorage for RocmStorage {
         scale_h: Option<f64>,
         scale_w: Option<f64>,
     ) -> Result<Self> {
-        let op = self.op1("upsample_bilinear2d", None)?;
+        let dims = l.dims();
+        let elem_count = dims[0] * dims[1] * h * w;
+        let mut op = self.op1(
+            "upsample_bilinear2d",
+            Some(kernel_output(DType::F32, elem_count)?),
+        )?;
+        op.input_layout = Some(kernel_layout(l)?);
+        if let Some(buffer) =
+            kernels::tensor::try_upsample_bilinear2d(&op, h, w, align_corners, scale_h, scale_w)
+                .map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                elem_count,
+                "upsample_bilinear2d",
+            );
+        }
         let storage = kernels::tensor::call_upsample_bilinear2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_bilinear2d(l, h, w, align_corners, scale_h, scale_w)
@@ -935,7 +1441,22 @@ impl BackendStorage for RocmStorage {
     }
 
     fn gather(&self, l: &Layout, ids: &Self, ids_l: &Layout, dim: usize) -> Result<Self> {
-        let op = self.op2("gather", ids, None)?;
+        let mut op = self.op2(
+            "gather",
+            ids,
+            Some(kernel_output_for_layout(ids_l, DType::F32)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(ids_l)?);
+        if let Some(buffer) = kernels::tensor::try_gather(&op, dim).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                ids_l.shape().elem_count(),
+                "gather",
+            );
+        }
         let storage = kernels::tensor::call_gather(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
@@ -959,6 +1480,21 @@ impl BackendStorage for RocmStorage {
             second: ids.tensor_arg()?,
             third: src.tensor_arg()?,
         };
+        let dst_kernel_l = kernel_layout(l)?;
+        let ids_kernel_l = kernel_layout(ids_l)?;
+        let src_kernel_l = kernel_layout(src_l)?;
+        if kernels::tensor::try_scatter(
+            &op,
+            &dst_kernel_l,
+            &ids_kernel_l,
+            &src_kernel_l,
+            dim,
+            false,
+        )
+        .map_err(Error::from)?
+        {
+            return Ok(());
+        }
         kernels::tensor::call_scatter_set(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
@@ -983,6 +1519,14 @@ impl BackendStorage for RocmStorage {
             second: ids.tensor_arg()?,
             third: src.tensor_arg()?,
         };
+        let dst_kernel_l = kernel_layout(l)?;
+        let ids_kernel_l = kernel_layout(ids_l)?;
+        let src_kernel_l = kernel_layout(src_l)?;
+        if kernels::tensor::try_scatter(&op, &dst_kernel_l, &ids_kernel_l, &src_kernel_l, dim, true)
+            .map_err(Error::from)?
+        {
+            return Ok(());
+        }
         kernels::tensor::call_scatter_add_set(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
@@ -993,7 +1537,23 @@ impl BackendStorage for RocmStorage {
     }
 
     fn index_select(&self, ids: &Self, l: &Layout, ids_l: &Layout, dim: usize) -> Result<Self> {
-        let op = self.op2("index_select", ids, None)?;
+        let output_elem_count = index_select_output_elem_count(l, ids_l, dim);
+        let mut op = self.op2(
+            "index_select",
+            ids,
+            Some(kernel_output(DType::F32, output_elem_count)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(l)?);
+        op.rhs_layout = Some(kernel_layout(ids_l)?);
+        if let Some(buffer) = kernels::tensor::try_index_select(&op, dim).map_err(Error::from)? {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                output_elem_count,
+                "index_select",
+            );
+        }
         let storage = kernels::tensor::call_index_select(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
@@ -1017,6 +1577,21 @@ impl BackendStorage for RocmStorage {
             src,
             Some(kernel_output_for_layout(l, DType::F32)?),
         )?;
+        let input_kernel_l = kernel_layout(l)?;
+        let ids_kernel_l = kernel_layout(ids_l)?;
+        let src_kernel_l = kernel_layout(src_l)?;
+        if let Some(buffer) =
+            kernels::tensor::try_index_add(&op, &input_kernel_l, &ids_kernel_l, &src_kernel_l, dim)
+                .map_err(Error::from)?
+        {
+            return Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                l.shape().elem_count(),
+                "index_add",
+            );
+        }
         let storage = kernels::tensor::call_index_add(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
@@ -1034,7 +1609,12 @@ impl BackendStorage for RocmStorage {
         rhs_l: &Layout,
     ) -> Result<Self> {
         let (b, m, n, _) = bmnk;
-        let op = self.op2("matmul", rhs, Some(kernel_output(DType::F32, b * m * n)?))?;
+        let mut op = self.op2("matmul", rhs, Some(kernel_output(DType::F32, b * m * n)?))?;
+        op.lhs_layout = Some(kernel_layout(lhs_l)?);
+        op.rhs_layout = Some(kernel_layout(rhs_l)?);
+        if let Some(buffer) = kernels::tensor::try_matmul(&op, bmnk).map_err(Error::from)? {
+            return Self::from_buffer(buffer, self.device.clone(), DType::F32, b * m * n, "matmul");
+        }
         let storage = kernels::tensor::call_matmul(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
@@ -1226,6 +1806,18 @@ impl BackendDevice for RocmDevice {
             device: self.kernel_device(),
             output: kernel_output(dtype, shape.elem_count())?,
         };
+        let seed = self.inner.next_seed();
+        if let Some(buffer) = kernels::device::try_rand_uniform(op, seed, lo as f32, up as f32)
+            .map_err(Error::from)?
+        {
+            return RocmStorage::from_buffer(
+                buffer,
+                self.clone(),
+                dtype,
+                shape.elem_count(),
+                "rand_uniform",
+            );
+        }
         let storage = kernels::device::call_rand_uniform(op, || {
             crate::cpu_backend::CpuDevice.rand_uniform(shape, dtype, lo, up)
         })?;
@@ -1245,6 +1837,18 @@ impl BackendDevice for RocmDevice {
             device: self.kernel_device(),
             output: kernel_output(dtype, shape.elem_count())?,
         };
+        let seed = self.inner.next_seed();
+        if let Some(buffer) = kernels::device::try_rand_normal(op, seed, mean as f32, std as f32)
+            .map_err(Error::from)?
+        {
+            return RocmStorage::from_buffer(
+                buffer,
+                self.clone(),
+                dtype,
+                shape.elem_count(),
+                "rand_normal",
+            );
+        }
         let storage = kernels::device::call_rand_normal(op, || {
             crate::cpu_backend::CpuDevice.rand_normal(shape, dtype, mean, std)
         })?;

@@ -84,6 +84,10 @@ impl Device {
         self.inner.seed.load(Ordering::Relaxed)
     }
 
+    pub fn next_seed(&self) -> u64 {
+        self.inner.seed.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn synchronize(&self) -> Result<()> {
         #[cfg(hip_runtime)]
         crate::hip::synchronize(self.ordinal())?;

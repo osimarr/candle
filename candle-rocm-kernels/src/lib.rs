@@ -361,6 +361,58 @@ pub mod device {
         cpu_fallback(op.name, fallback)
     }
 
+    pub fn try_rand_uniform(
+        op: AllocOp<'_>,
+        seed: u64,
+        lo: f32,
+        up: f32,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, seed, lo, up);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if op.output.dtype() != KernelDType::F32 {
+                return Ok(None);
+            }
+            let dst = op.device.allocate(
+                op.output
+                    .dtype()
+                    .storage_size_in_bytes(op.output.elem_count()),
+            )?;
+            crate::hip::random_uniform_f32(&dst, op.output.elem_count(), seed, lo, up)?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_rand_normal(
+        op: AllocOp<'_>,
+        seed: u64,
+        mean: f32,
+        std: f32,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, seed, mean, std);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if op.output.dtype() != KernelDType::F32 {
+                return Ok(None);
+            }
+            let dst = op.device.allocate(
+                op.output
+                    .dtype()
+                    .storage_size_in_bytes(op.output.elem_count()),
+            )?;
+            crate::hip::random_normal_f32(&dst, op.output.elem_count(), seed, mean, std)?;
+            Ok(Some(dst))
+        }
+    }
+
     pub fn call_set_seed<T, E, F>(op: DeviceOp<'_>, fallback: F) -> std::result::Result<T, E>
     where
         F: FnOnce() -> std::result::Result<T, E>,
@@ -546,6 +598,25 @@ pub mod tensor {
         },
     }
 
+    #[derive(Clone, Copy, Debug)]
+    pub struct Conv1dParams {
+        pub padding: usize,
+        pub stride: usize,
+        pub dilation: usize,
+        pub l_out: usize,
+        pub elem_count: usize,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Conv2dParams {
+        pub padding: usize,
+        pub stride: usize,
+        pub dilation: usize,
+        pub out_h: usize,
+        pub out_w: usize,
+        pub elem_count: usize,
+    }
+
     macro_rules! call_op {
         ($fn_name:ident, $op_ty:ty) => {
             pub fn $fn_name<T, E, F>(op: $op_ty, fallback: F) -> std::result::Result<T, E>
@@ -633,6 +704,141 @@ pub mod tensor {
             Err(RocmError::UnsupportedDType { .. } | RocmError::NotImplemented(_)) => fallback(),
             Err(err) => Err(E::from(err)),
         }
+    }
+
+    pub fn try_clone(op: &Op1) -> crate::Result<Option<Buffer>> {
+        let Some(layout) = op.input_layout.as_ref() else {
+            return Ok(None);
+        };
+        let Some(output) = op.output else {
+            return Ok(None);
+        };
+        if op.input.dtype() != output.dtype() || op.input.elem_count() < layout.elem_count() {
+            return Ok(None);
+        }
+        check_layout(&op.input, layout)?;
+        let dst = op.input.buffer().allocate_on_same_allocator(
+            output.dtype().storage_size_in_bytes(output.elem_count()),
+            false,
+        )?;
+        let copy = InplaceOp2 {
+            name: "try_clone",
+            dst: TensorArg::new(&dst, output.dtype(), output.elem_count())?,
+            src: op.input.clone(),
+            copy: Some(CopySpec::StridedSrc {
+                dst_offset: 0,
+                src_layout: layout.clone(),
+            }),
+        };
+        copy_strided_src(&copy)?;
+        Ok(Some(dst))
+    }
+
+    pub fn try_affine(op: &Op1, mul: f32, add: f32) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, mul, add);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        try_scalar(op, |src, layout, dst| {
+            crate::hip::affine_f32(src, layout, dst, mul, add)?;
+            Ok(true)
+        })
+    }
+
+    pub fn try_powf(op: &Op1, value: f32) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, value);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        try_scalar(op, |src, layout, dst| {
+            crate::hip::powf_f32(src, layout, dst, value)?;
+            Ok(true)
+        })
+    }
+
+    pub fn try_elu(op: &Op1, alpha: f32) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, alpha);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        try_scalar(op, |src, layout, dst| {
+            crate::hip::elu_f32(src, layout, dst, alpha)?;
+            Ok(true)
+        })
+    }
+
+    pub fn try_reduce(op: &Op1, reduce_dims: &[usize]) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, reduce_dims);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            let Some(code) = reduce_opcode(op.name) else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32 {
+                return Ok(None);
+            }
+            let output_dtype = if matches!(code, 4 | 5) {
+                KernelDType::U32
+            } else {
+                KernelDType::F32
+            };
+            if output.dtype() != output_dtype {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let mut reduce_mask = 0u64;
+            let mut reduce_count = 1usize;
+            for &dim in reduce_dims {
+                if dim >= layout.dims().len() || dim >= u64::BITS as usize {
+                    return Ok(None);
+                }
+                reduce_mask |= 1u64 << dim;
+                reduce_count = reduce_count.saturating_mul(layout.dims()[dim]);
+            }
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::reduce_f32(
+                code,
+                op.input.buffer(),
+                layout,
+                reduce_mask,
+                reduce_count,
+                &dst,
+                output.elem_count(),
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_to_dtype(op: &Op1) -> crate::Result<Option<Buffer>> {
+        let Some(_) = op.input_layout.as_ref() else {
+            return Ok(None);
+        };
+        let Some(output) = op.output else {
+            return Ok(None);
+        };
+        if op.input.dtype() != KernelDType::F32 || output.dtype() != KernelDType::F32 {
+            return Ok(None);
+        }
+        try_clone(op)
     }
 
     pub fn try_unary(op: &Op1) -> crate::Result<Option<Buffer>> {
@@ -748,6 +954,996 @@ pub mod tensor {
             return Ok(Some(buffer));
         }
         try_cmp_host(op)
+    }
+
+    pub fn try_where_cond(
+        op: &Op3,
+        cond_layout: &LayoutArg,
+        true_layout: &LayoutArg,
+        false_layout: &LayoutArg,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, cond_layout, true_layout, false_layout);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.first.dtype() != KernelDType::U8
+                || op.second.dtype() != KernelDType::F32
+                || op.third.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+            {
+                return Ok(None);
+            }
+            if cond_layout.elem_count() != output.elem_count()
+                || true_layout.elem_count() != output.elem_count()
+                || false_layout.elem_count() != output.elem_count()
+            {
+                return Ok(None);
+            }
+            check_layout(&op.first, cond_layout)?;
+            check_layout(&op.second, true_layout)?;
+            check_layout(&op.third, false_layout)?;
+            let dst = op.first.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::where_u8_f32(
+                op.first.buffer(),
+                cond_layout,
+                op.second.buffer(),
+                true_layout,
+                op.third.buffer(),
+                false_layout,
+                &dst,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_arg_sort(op: &Op1, asc: bool, last_dim: usize) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, asc, last_dim);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::U32
+                || output.elem_count() != layout.elem_count()
+                || layout.dims().last().copied() != Some(last_dim)
+                || last_dim == 0
+                || !is_contiguous(layout)
+            {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::arg_sort_f32(op.input.buffer(), layout, &dst, asc, last_dim)?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_conv1d(op: &Op2, params: Conv1dParams) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, params);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(kernel_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != 3
+                || kernel_layout.dims().len() != 3
+                || src_layout.dims()[1] != kernel_layout.dims()[1]
+                || output.elem_count() != params.elem_count
+                || params.elem_count
+                    != src_layout.dims()[0] * kernel_layout.dims()[0] * params.l_out
+                || params.stride == 0
+                || params.dilation == 0
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            check_layout(&op.rhs, kernel_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::conv1d_f32(
+                op.lhs.buffer(),
+                src_layout,
+                op.rhs.buffer(),
+                kernel_layout,
+                &dst,
+                params.padding,
+                params.stride,
+                params.dilation,
+                params.l_out,
+                params.elem_count,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_conv_transpose1d(op: &Op2, params: Conv1dParams) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, params);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(kernel_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != 3
+                || kernel_layout.dims().len() != 3
+                || src_layout.dims()[1] != kernel_layout.dims()[0]
+                || output.elem_count() != params.elem_count
+                || params.elem_count
+                    != src_layout.dims()[0] * kernel_layout.dims()[1] * params.l_out
+                || params.stride == 0
+                || params.dilation == 0
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            check_layout(&op.rhs, kernel_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::conv_transpose1d_f32(
+                op.lhs.buffer(),
+                src_layout,
+                op.rhs.buffer(),
+                kernel_layout,
+                &dst,
+                params.padding,
+                params.stride,
+                params.dilation,
+                params.l_out,
+                params.elem_count,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_conv2d(op: &Op2, params: Conv2dParams) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, params);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(kernel_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != 4
+                || kernel_layout.dims().len() != 4
+                || src_layout.dims()[1] != kernel_layout.dims()[1]
+                || output.elem_count() != params.elem_count
+                || params.elem_count
+                    != src_layout.dims()[0] * kernel_layout.dims()[0] * params.out_h * params.out_w
+                || params.stride == 0
+                || params.dilation == 0
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            check_layout(&op.rhs, kernel_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::conv2d_f32(
+                op.lhs.buffer(),
+                src_layout,
+                op.rhs.buffer(),
+                kernel_layout,
+                &dst,
+                params.padding,
+                params.stride,
+                params.dilation,
+                params.out_h,
+                params.out_w,
+                params.elem_count,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_conv_transpose2d(op: &Op2, params: Conv2dParams) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, params);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(kernel_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != 4
+                || kernel_layout.dims().len() != 4
+                || src_layout.dims()[1] != kernel_layout.dims()[0]
+                || output.elem_count() != params.elem_count
+                || params.elem_count
+                    != src_layout.dims()[0] * kernel_layout.dims()[1] * params.out_h * params.out_w
+                || params.stride == 0
+                || params.dilation == 0
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            check_layout(&op.rhs, kernel_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::conv_transpose2d_f32(
+                op.lhs.buffer(),
+                src_layout,
+                op.rhs.buffer(),
+                kernel_layout,
+                &dst,
+                params.padding,
+                params.stride,
+                params.dilation,
+                params.out_h,
+                params.out_w,
+                params.elem_count,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_pool2d(
+        op: &Op1,
+        kernel: (usize, usize),
+        stride: (usize, usize),
+        max_pool: bool,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, kernel, stride, max_pool);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || layout.dims().len() != 4
+                || kernel.0 == 0
+                || kernel.1 == 0
+                || stride.0 == 0
+                || stride.1 == 0
+                || layout.dims()[2] < kernel.0
+                || layout.dims()[3] < kernel.1
+            {
+                return Ok(None);
+            }
+            let out_h = (layout.dims()[2] - kernel.0) / stride.0 + 1;
+            let out_w = (layout.dims()[3] - kernel.1) / stride.1 + 1;
+            let elem_count = layout.dims()[0] * layout.dims()[1] * out_h * out_w;
+            if output.elem_count() != elem_count {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::pool2d_f32(
+                if max_pool { 2 } else { 1 },
+                op.input.buffer(),
+                layout,
+                &dst,
+                kernel,
+                stride,
+                out_h,
+                out_w,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_upsample_nearest1d(op: &Op1, out_size: usize) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, out_size);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || layout.dims().len() != 3
+                || out_size == 0
+            {
+                return Ok(None);
+            }
+            let elem_count = layout.dims()[0] * layout.dims()[1] * out_size;
+            if output.elem_count() != elem_count {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::upsample_nearest1d_f32(op.input.buffer(), layout, &dst, out_size)?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_upsample_nearest2d(
+        op: &Op1,
+        out_h: usize,
+        out_w: usize,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, out_h, out_w);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || layout.dims().len() != 4
+                || out_h == 0
+                || out_w == 0
+            {
+                return Ok(None);
+            }
+            let elem_count = layout.dims()[0] * layout.dims()[1] * out_h * out_w;
+            if output.elem_count() != elem_count {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::upsample_nearest2d_f32(op.input.buffer(), layout, &dst, out_h, out_w)?;
+            Ok(Some(dst))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_upsample_bilinear2d(
+        op: &Op1,
+        out_h: usize,
+        out_w: usize,
+        align_corners: bool,
+        scale_h: Option<f64>,
+        scale_w: Option<f64>,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, out_h, out_w, align_corners, scale_h, scale_w);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || layout.dims().len() != 4
+                || out_h == 0
+                || out_w == 0
+            {
+                return Ok(None);
+            }
+            let elem_count = layout.dims()[0] * layout.dims()[1] * out_h * out_w;
+            if output.elem_count() != elem_count {
+                return Ok(None);
+            }
+            let in_h = layout.dims()[2];
+            let in_w = layout.dims()[3];
+            let scale_h = if align_corners {
+                if out_h > 1 {
+                    (in_h - 1) as f64 / (out_h - 1) as f64
+                } else {
+                    0.0
+                }
+            } else {
+                scale_h
+                    .map(|scale| 1.0 / scale)
+                    .unwrap_or(in_h as f64 / out_h as f64)
+            };
+            let scale_w = if align_corners {
+                if out_w > 1 {
+                    (in_w - 1) as f64 / (out_w - 1) as f64
+                } else {
+                    0.0
+                }
+            } else {
+                scale_w
+                    .map(|scale| 1.0 / scale)
+                    .unwrap_or(in_w as f64 / out_w as f64)
+            };
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::upsample_bilinear2d_f32(
+                op.input.buffer(),
+                layout,
+                &dst,
+                out_h,
+                out_w,
+                scale_h,
+                scale_w,
+                align_corners,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_index_select(op: &Op2, dim: usize) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, dim);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(ids_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32 || output.dtype() != KernelDType::F32 {
+                return Ok(None);
+            }
+            if ids_layout.dims().len() != 1 || dim >= src_layout.dims().len() {
+                return Ok(None);
+            }
+            let n_ids = ids_layout.dims()[0];
+            if ids_layout.start_offset() + ids_layout.stride()[0].saturating_mul(n_ids)
+                > op.rhs.elem_count()
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            match op.rhs.dtype() {
+                KernelDType::U32 => crate::hip::index_select_u32_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                KernelDType::I64 => crate::hip::index_select_i64_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                _ => return Ok(None),
+            }
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_gather(op: &Op2, dim: usize) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, dim);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(ids_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::U32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != ids_layout.dims().len()
+                || dim >= src_layout.dims().len()
+                || ids_layout.elem_count() != output.elem_count()
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, src_layout)?;
+            check_layout(&op.rhs, ids_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::gather_u32_f32(
+                op.lhs.buffer(),
+                src_layout,
+                op.rhs.buffer(),
+                ids_layout,
+                dim,
+                &dst,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_scatter(
+        op: &InplaceOp3,
+        dst_layout: &LayoutArg,
+        ids_layout: &LayoutArg,
+        src_layout: &LayoutArg,
+        dim: usize,
+        add: bool,
+    ) -> crate::Result<bool> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, dst_layout, ids_layout, src_layout, dim, add);
+            Ok(false)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if op.dst.dtype() != KernelDType::F32
+                || op.second.dtype() != KernelDType::U32
+                || op.third.dtype() != KernelDType::F32
+                || dst_layout.dims().len() != ids_layout.dims().len()
+                || ids_layout.dims().len() != src_layout.dims().len()
+                || dim >= dst_layout.dims().len()
+                || ids_layout.elem_count() != src_layout.elem_count()
+            {
+                return Ok(false);
+            }
+            for (axis, (&ids_dim, &src_dim)) in
+                ids_layout.dims().iter().zip(src_layout.dims()).enumerate()
+            {
+                if ids_dim != src_dim || (axis != dim && ids_dim != dst_layout.dims()[axis]) {
+                    return Ok(false);
+                }
+            }
+            check_layout(&op.dst, dst_layout)?;
+            check_layout(&op.second, ids_layout)?;
+            check_layout(&op.third, src_layout)?;
+            crate::hip::scatter_u32_f32(
+                add,
+                op.dst.buffer(),
+                dst_layout,
+                op.second.buffer(),
+                ids_layout,
+                op.third.buffer(),
+                src_layout,
+                dim,
+            )?;
+            Ok(true)
+        }
+    }
+
+    pub fn try_index_add(
+        op: &Op3,
+        input_layout: &LayoutArg,
+        ids_layout: &LayoutArg,
+        src_layout: &LayoutArg,
+        dim: usize,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, input_layout, ids_layout, src_layout, dim);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.first.dtype() != KernelDType::F32
+                || op.second.dtype() != KernelDType::U32
+                || op.third.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || ids_layout.dims().len() != 1
+                || dim >= input_layout.dims().len()
+                || input_layout.dims().len() != src_layout.dims().len()
+                || src_layout.dims()[dim] != ids_layout.dims()[0]
+                || input_layout.elem_count() != output.elem_count()
+            {
+                return Ok(None);
+            }
+            for (axis, (&input_dim, &src_dim)) in input_layout
+                .dims()
+                .iter()
+                .zip(src_layout.dims())
+                .enumerate()
+            {
+                if axis != dim && input_dim != src_dim {
+                    return Ok(None);
+                }
+            }
+            check_layout(&op.first, input_layout)?;
+            check_layout(&op.second, ids_layout)?;
+            check_layout(&op.third, src_layout)?;
+            let dst = op.first.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::index_add_u32_f32(
+                op.first.buffer(),
+                input_layout,
+                op.second.buffer(),
+                ids_layout.start_offset(),
+                ids_layout.stride()[0],
+                ids_layout.dims()[0],
+                op.third.buffer(),
+                src_layout,
+                dim,
+                &dst,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_matmul(
+        op: &Op2,
+        bmnk: (usize, usize, usize, usize),
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, bmnk);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(lhs_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(rhs_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+            {
+                return Ok(None);
+            }
+            let (b, m, n, k) = bmnk;
+            if output.elem_count() != b * m * n
+                || lhs_layout.dims().len() < 2
+                || rhs_layout.dims().len() < 2
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, lhs_layout)?;
+            check_layout(&op.rhs, rhs_layout)?;
+            let Some((lhs_batch_stride, rhs_batch_stride)) =
+                batch_strides(lhs_layout, rhs_layout, m, n, k)
+            else {
+                return Ok(None);
+            };
+            let lhs_rank = lhs_layout.dims().len();
+            let rhs_rank = rhs_layout.dims().len();
+            let lhs_row_stride = lhs_layout.stride()[lhs_rank - 2];
+            let lhs_col_stride = lhs_layout.stride()[lhs_rank - 1];
+            let rhs_row_stride = rhs_layout.stride()[rhs_rank - 2];
+            let rhs_col_stride = rhs_layout.stride()[rhs_rank - 1];
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::matmul_f32(
+                op.lhs.buffer(),
+                op.rhs.buffer(),
+                &dst,
+                bmnk,
+                lhs_layout.start_offset(),
+                rhs_layout.start_offset(),
+                lhs_batch_stride,
+                rhs_batch_stride,
+                lhs_row_stride,
+                lhs_col_stride,
+                rhs_row_stride,
+                rhs_col_stride,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_softmax_last_dim(op: &Op1) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = op;
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(layout) = op.input_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.input.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || !is_contiguous(layout)
+                || layout.dims().is_empty()
+            {
+                return Ok(None);
+            }
+            let cols = *layout.dims().last().unwrap();
+            let rows = layout.elem_count() / cols;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::softmax_last_dim_f32(
+                op.input.buffer(),
+                layout.start_offset(),
+                &dst,
+                rows,
+                cols,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_rms_norm(op: &Op2, eps: f32) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, eps);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(src_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(alpha_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || !is_contiguous(src_layout)
+                || !is_contiguous(alpha_layout)
+                || src_layout.dims().is_empty()
+            {
+                return Ok(None);
+            }
+            let cols = *src_layout.dims().last().unwrap();
+            if alpha_layout.elem_count() != cols {
+                return Ok(None);
+            }
+            let rows = src_layout.elem_count() / cols;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::rms_norm_f32(
+                op.lhs.buffer(),
+                src_layout.start_offset(),
+                op.rhs.buffer(),
+                alpha_layout.start_offset(),
+                &dst,
+                rows,
+                cols,
+                eps,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_layer_norm(
+        op: &Op3,
+        src_layout: &LayoutArg,
+        alpha_layout: &LayoutArg,
+        beta_layout: &LayoutArg,
+        eps: f32,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, src_layout, alpha_layout, beta_layout, eps);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.first.dtype() != KernelDType::F32
+                || op.second.dtype() != KernelDType::F32
+                || op.third.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || !is_contiguous(src_layout)
+                || !is_contiguous(alpha_layout)
+                || !is_contiguous(beta_layout)
+                || src_layout.dims().is_empty()
+            {
+                return Ok(None);
+            }
+            let cols = *src_layout.dims().last().unwrap();
+            if alpha_layout.elem_count() != cols || beta_layout.elem_count() != cols {
+                return Ok(None);
+            }
+            let rows = src_layout.elem_count() / cols;
+            let dst = op.first.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::layer_norm_f32(
+                op.first.buffer(),
+                src_layout.start_offset(),
+                op.second.buffer(),
+                alpha_layout.start_offset(),
+                op.third.buffer(),
+                beta_layout.start_offset(),
+                &dst,
+                rows,
+                cols,
+                eps,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_rope(
+        op: &Op3,
+        src_layout: &LayoutArg,
+        cos_layout: &LayoutArg,
+        sin_layout: &LayoutArg,
+        interleaved: bool,
+        thd: bool,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, src_layout, cos_layout, sin_layout, interleaved, thd);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.first.dtype() != KernelDType::F32
+                || op.second.dtype() != KernelDType::F32
+                || op.third.dtype() != KernelDType::F32
+                || output.dtype() != KernelDType::F32
+                || src_layout.dims().len() != 4
+                || !is_contiguous(src_layout)
+                || !is_contiguous(cos_layout)
+                || !is_contiguous(sin_layout)
+            {
+                return Ok(None);
+            }
+            let dims = src_layout.dims();
+            let (b, h, t, d) = if thd {
+                (dims[0], dims[2], dims[1], dims[3])
+            } else {
+                (dims[0], dims[1], dims[2], dims[3])
+            };
+            let unbatched_rope = cos_layout.dims().len() == 3 && sin_layout.dims().len() == 3;
+            let dst = op.first.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::rope_f32(
+                op.first.buffer(),
+                src_layout.start_offset(),
+                op.second.buffer(),
+                cos_layout.start_offset(),
+                op.third.buffer(),
+                sin_layout.start_offset(),
+                &dst,
+                b,
+                h,
+                t,
+                d,
+                interleaved,
+                unbatched_rope,
+                thd,
+            )?;
+            Ok(Some(dst))
+        }
     }
 
     fn try_cmp_host(op: &Op2) -> crate::Result<Option<Buffer>> {
@@ -1211,6 +2407,80 @@ pub mod tensor {
     }
 
     #[cfg(hip_runtime)]
+    fn try_scalar<F>(op: &Op1, launch: F) -> crate::Result<Option<Buffer>>
+    where
+        F: FnOnce(&Buffer, &LayoutArg, &Buffer) -> crate::Result<bool>,
+    {
+        let Some(layout) = op.input_layout.as_ref() else {
+            return Ok(None);
+        };
+        let Some(output) = op.output else {
+            return Ok(None);
+        };
+        if op.input.dtype() != KernelDType::F32
+            || output.dtype() != KernelDType::F32
+            || output.elem_count() != layout.elem_count()
+        {
+            return Ok(None);
+        }
+        check_layout(&op.input, layout)?;
+        let dst = op.input.buffer().allocate_on_same_allocator(
+            output.dtype().storage_size_in_bytes(output.elem_count()),
+            false,
+        )?;
+        if launch(op.input.buffer(), layout, &dst)? {
+            Ok(Some(dst))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(hip_runtime)]
+    fn is_contiguous(layout: &LayoutArg) -> bool {
+        let mut expected = 1usize;
+        for (&dim, &stride) in layout.dims().iter().zip(layout.stride()).rev() {
+            if stride != expected {
+                return false;
+            }
+            expected = expected.saturating_mul(dim);
+        }
+        true
+    }
+
+    #[cfg(hip_runtime)]
+    fn batch_strides(
+        lhs_layout: &LayoutArg,
+        rhs_layout: &LayoutArg,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Option<(usize, usize)> {
+        let lhs_stride = lhs_layout.stride();
+        let rhs_stride = rhs_layout.stride();
+        let rank = lhs_stride.len();
+        if rhs_stride.len() != rank || rank < 2 {
+            return None;
+        }
+        let lhs_batch_stride = match &lhs_stride[..rank - 2] {
+            [s1, stride] if *s1 == *stride * lhs_layout.dims()[1] => *stride,
+            [_, stride] if lhs_layout.dims()[0] == 1 => *stride,
+            [stride, _] if lhs_layout.dims()[1] == 1 => *stride,
+            [stride] => *stride,
+            [] => m * k,
+            _ => return None,
+        };
+        let rhs_batch_stride = match &rhs_stride[..rank - 2] {
+            [s1, stride] if *s1 == *stride * rhs_layout.dims()[1] => *stride,
+            [_, stride] if rhs_layout.dims()[0] == 1 => *stride,
+            [stride, _] if rhs_layout.dims()[1] == 1 => *stride,
+            [stride] => *stride,
+            [] => n * k,
+            _ => return None,
+        };
+        Some((lhs_batch_stride, rhs_batch_stride))
+    }
+
+    #[cfg(hip_runtime)]
     fn unary_opcode(name: &str) -> Option<i32> {
         match name {
             "abs" => Some(1),
@@ -1227,6 +2497,24 @@ pub mod tensor {
             "sqr" => Some(12),
             "sqrt" => Some(13),
             "tanh" => Some(14),
+            "silu" => Some(15),
+            "gelu" => Some(16),
+            "erf" => Some(17),
+            "gelu_erf" => Some(18),
+            "sign" => Some(19),
+            "sigmoid" => Some(20),
+            _ => None,
+        }
+    }
+
+    #[cfg(hip_runtime)]
+    fn reduce_opcode(name: &str) -> Option<i32> {
+        match name {
+            "sum" => Some(1),
+            "min" => Some(2),
+            "max" => Some(3),
+            "argmin" => Some(4),
+            "argmax" => Some(5),
             _ => None,
         }
     }
