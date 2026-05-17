@@ -26,9 +26,6 @@ impl std::fmt::Debug for Buffer {
 
 impl Buffer {
     pub(crate) fn new(id: u64, device_ordinal: usize, bytes: usize, zeroed: bool) -> Result<Self> {
-        if bytes == 0 {
-            return Err(RocmError::InvalidAllocationSize { bytes });
-        }
         let data = if zeroed {
             vec![0; bytes]
         } else {

@@ -93,6 +93,15 @@ mod tests {
     }
 
     #[test]
+    fn host_copy_empty_buffer() {
+        let device = Device::new(0).unwrap();
+        let buffer = device.copy_from_host(&[]).unwrap();
+        let mut dst = [];
+        device.copy_to_host(&buffer, &mut dst).unwrap();
+        assert_eq!(buffer.size_in_bytes(), 0);
+    }
+
+    #[test]
     fn device_identity_is_exact() {
         let d1 = Device::new(0).unwrap();
         let d2 = d1.clone();
