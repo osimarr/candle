@@ -251,7 +251,7 @@ impl Storage {
                 Ok((Self::Metal(storage), shape))
             }
             Self::Rocm(storage) => {
-                let (storage, shape) = storage.apply_op1(l, c)?;
+                let (storage, shape) = c.rocm_fwd(storage, l)?;
                 Ok((Self::Rocm(storage), shape))
             }
         }
@@ -279,7 +279,7 @@ impl Storage {
                 Ok((Self::Metal(s), shape))
             }
             (Self::Rocm(s1), Self::Rocm(s2)) => {
-                let (s, shape) = s1.apply_op2(l1, s2, l2, c)?;
+                let (s, shape) = c.rocm_fwd(s1, l1, s2, l2)?;
                 Ok((Self::Rocm(s), shape))
             }
             _ => unreachable!(),
@@ -311,7 +311,7 @@ impl Storage {
                 Ok((Self::Metal(s), shape))
             }
             (Self::Rocm(s1), Self::Rocm(s2), Self::Rocm(s3)) => {
-                let (s, shape) = s1.apply_op3(l1, s2, l2, s3, l3, c)?;
+                let (s, shape) = c.rocm_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Rocm(s), shape))
             }
             _ => unreachable!(),
@@ -323,7 +323,7 @@ impl Storage {
             Self::Cpu(storage) => c.cpu_fwd(storage, l),
             Self::Cuda(storage) => c.cuda_fwd(storage, l),
             Self::Metal(storage) => c.metal_fwd(storage, l),
-            Self::Rocm(storage) => storage.inplace_op1(l, c),
+            Self::Rocm(storage) => c.rocm_fwd(storage, l),
         }
     }
 
@@ -339,7 +339,7 @@ impl Storage {
             (Self::Cpu(s1), Self::Cpu(s2)) => c.cpu_fwd(s1, l1, s2, l2),
             (Self::Cuda(s1), Self::Cuda(s2)) => c.cuda_fwd(s1, l1, s2, l2),
             (Self::Metal(s1), Self::Metal(s2)) => c.metal_fwd(s1, l1, s2, l2),
-            (Self::Rocm(s1), Self::Rocm(s2)) => s1.inplace_op2(l1, s2, l2, c),
+            (Self::Rocm(s1), Self::Rocm(s2)) => c.rocm_fwd(s1, l1, s2, l2),
             _ => unreachable!(),
         }
     }
@@ -361,9 +361,7 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 c.metal_fwd(s1, l1, s2, l2, s3, l3)
             }
-            (Self::Rocm(s1), Self::Rocm(s2), Self::Rocm(s3)) => {
-                s1.inplace_op3(l1, s2, l2, s3, l3, c)
-            }
+            (Self::Rocm(s1), Self::Rocm(s2), Self::Rocm(s3)) => c.rocm_fwd(s1, l1, s2, l2, s3, l3),
             _ => unreachable!(),
         }
     }

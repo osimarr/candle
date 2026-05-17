@@ -14,10 +14,7 @@ use std::sync::Arc;
 
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
-use crate::{
-    CpuStorage, CustomOp1, CustomOp2, CustomOp3, DType, Error, InplaceOp1, InplaceOp2, InplaceOp3,
-    Layout, Result, Shape,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Shape};
 
 #[derive(Debug, Clone)]
 pub struct RocmDevice {
@@ -207,41 +204,53 @@ impl RocmStorage {
         Self::from_buffer(buffer, dst.clone(), self.dtype, self.elem_count, "transfer")
     }
 
-    pub(crate) fn apply_op1(&self, l: &Layout, c: &dyn CustomOp1) -> Result<(Self, Shape)> {
-        let (storage, shape) = if c.name() == "argsort" {
+    pub(crate) fn custom_op1<F>(
+        &self,
+        l: &Layout,
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<(Self, Shape)>
+    where
+        F: FnOnce(&CpuStorage, &Layout) -> Result<(CpuStorage, Shape)>,
+    {
+        let (storage, shape) = if name == "argsort" {
             let op = kernels::custom::Op1 {
-                name: c.name(),
+                name,
                 input: self.tensor_arg()?,
                 output: Some(kernel_output_for_layout(l, DType::U32)?),
             };
             kernels::custom::call_arg_sort(op, || {
                 let storage = self.to_cpu_storage_impl()?;
-                c.cpu_fwd(&storage, l)
+                cpu_fwd(&storage, l)
             })?
         } else {
             let op = kernels::custom::Op1 {
-                name: c.name(),
+                name,
                 input: self.tensor_arg()?,
                 output: None,
             };
             kernels::custom::call_apply_op1(op, || {
                 let storage = self.to_cpu_storage_impl()?;
-                c.cpu_fwd(&storage, l)
+                cpu_fwd(&storage, l)
             })?
         };
-        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
+        let storage = Self::wrap(storage, self.device.clone(), name)?;
         Ok((storage, shape))
     }
 
-    pub(crate) fn apply_op2(
+    pub(crate) fn custom_op2<F>(
         &self,
         l1: &Layout,
         rhs: &Self,
         l2: &Layout,
-        c: &dyn CustomOp2,
-    ) -> Result<(Self, Shape)> {
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<(Self, Shape)>
+    where
+        F: FnOnce(&CpuStorage, &Layout, &CpuStorage, &Layout) -> Result<(CpuStorage, Shape)>,
+    {
         let op = kernels::custom::Op2 {
-            name: c.name(),
+            name,
             lhs: self.tensor_arg()?,
             rhs: rhs.tensor_arg()?,
             output: None,
@@ -249,23 +258,34 @@ impl RocmStorage {
         let (storage, shape) = kernels::custom::call_apply_op2(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
-            c.cpu_fwd(&lhs, l1, &rhs, l2)
+            cpu_fwd(&lhs, l1, &rhs, l2)
         })?;
-        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
+        let storage = Self::wrap(storage, self.device.clone(), name)?;
         Ok((storage, shape))
     }
 
-    pub(crate) fn apply_op3(
+    pub(crate) fn custom_op3<F>(
         &self,
         l1: &Layout,
-        t2: &Self,
-        l2: &Layout,
-        t3: &Self,
-        l3: &Layout,
-        c: &dyn CustomOp3,
-    ) -> Result<(Self, Shape)> {
+        t2: (&Self, &Layout),
+        t3: (&Self, &Layout),
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<(Self, Shape)>
+    where
+        F: FnOnce(
+            &CpuStorage,
+            &Layout,
+            &CpuStorage,
+            &Layout,
+            &CpuStorage,
+            &Layout,
+        ) -> Result<(CpuStorage, Shape)>,
+    {
+        let (t2, l2) = t2;
+        let (t3, l3) = t3;
         let op = kernels::custom::Op3 {
-            name: c.name(),
+            name,
             lhs: self.tensor_arg()?,
             rhs2: t2.tensor_arg()?,
             rhs3: t3.tensor_arg()?,
@@ -275,57 +295,80 @@ impl RocmStorage {
             let t1 = self.to_cpu_storage_impl()?;
             let t2 = t2.to_cpu_storage_impl()?;
             let t3 = t3.to_cpu_storage_impl()?;
-            c.cpu_fwd(&t1, l1, &t2, l2, &t3, l3)
+            cpu_fwd(&t1, l1, &t2, l2, &t3, l3)
         })?;
-        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
+        let storage = Self::wrap(storage, self.device.clone(), name)?;
         Ok((storage, shape))
     }
 
-    pub(crate) fn inplace_op1(&mut self, l: &Layout, c: &dyn InplaceOp1) -> Result<()> {
+    pub(crate) fn inplace_custom_op1<F>(
+        &mut self,
+        l: &Layout,
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut CpuStorage, &Layout) -> Result<()>,
+    {
         let op = kernels::custom::InplaceOp1 {
-            name: c.name(),
+            name,
             dst: self.tensor_arg()?,
         };
         let storage = kernels::custom::call_inplace_op1(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
-            c.cpu_fwd(&mut storage, l)?;
+            cpu_fwd(&mut storage, l)?;
             Ok::<CpuStorage, Error>(storage)
         })?;
-        self.set_cpu_storage_f32_owned(storage, c.name())
+        self.set_cpu_storage_owned(storage, name)
     }
 
-    pub(crate) fn inplace_op2(
+    pub(crate) fn inplace_custom_op2<F>(
         &mut self,
         l1: &Layout,
         rhs: &Self,
         l2: &Layout,
-        c: &dyn InplaceOp2,
-    ) -> Result<()> {
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut CpuStorage, &Layout, &CpuStorage, &Layout) -> Result<()>,
+    {
         let op = kernels::custom::InplaceOp2 {
-            name: c.name(),
+            name,
             dst: self.tensor_arg()?,
             rhs: rhs.tensor_arg()?,
         };
         let storage = kernels::custom::call_inplace_op2(op, || {
             let mut lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
-            c.cpu_fwd(&mut lhs, l1, &rhs, l2)?;
+            cpu_fwd(&mut lhs, l1, &rhs, l2)?;
             Ok::<CpuStorage, Error>(lhs)
         })?;
-        self.set_cpu_storage_f32_owned(storage, c.name())
+        self.set_cpu_storage_owned(storage, name)
     }
 
-    pub(crate) fn inplace_op3(
+    pub(crate) fn inplace_custom_op3<F>(
         &mut self,
         l1: &Layout,
-        t2: &Self,
-        l2: &Layout,
-        t3: &Self,
-        l3: &Layout,
-        c: &dyn InplaceOp3,
-    ) -> Result<()> {
+        t2: (&Self, &Layout),
+        t3: (&Self, &Layout),
+        name: &'static str,
+        cpu_fwd: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(
+            &mut CpuStorage,
+            &Layout,
+            &CpuStorage,
+            &Layout,
+            &CpuStorage,
+            &Layout,
+        ) -> Result<()>,
+    {
+        let (t2, l2) = t2;
+        let (t3, l3) = t3;
         let op = kernels::custom::InplaceOp3 {
-            name: c.name(),
+            name,
             dst: self.tensor_arg()?,
             rhs2: t2.tensor_arg()?,
             rhs3: t3.tensor_arg()?,
@@ -334,10 +377,10 @@ impl RocmStorage {
             let mut t1 = self.to_cpu_storage_impl()?;
             let t2 = t2.to_cpu_storage_impl()?;
             let t3 = t3.to_cpu_storage_impl()?;
-            c.cpu_fwd(&mut t1, l1, &t2, l2, &t3, l3)?;
+            cpu_fwd(&mut t1, l1, &t2, l2, &t3, l3)?;
             Ok::<CpuStorage, Error>(t1)
         })?;
-        self.set_cpu_storage_f32_owned(storage, c.name())
+        self.set_cpu_storage_owned(storage, name)
     }
 }
 

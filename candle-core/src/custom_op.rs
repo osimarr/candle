@@ -1,6 +1,6 @@
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
-use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Tensor};
+use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, RocmStorage, Shape, Tensor};
 use std::sync::Arc;
 
 /// Unary ops that can be defined in user-land.
@@ -30,6 +30,23 @@ pub trait CustomOp1 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(&self, storage: &RocmStorage, layout: &Layout) -> Result<(RocmStorage, Shape)> {
+        #[cfg(feature = "rocm")]
+        {
+            storage.custom_op1(layout, self.name(), |storage, layout| {
+                self.cpu_fwd(storage, layout)
+            })
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (storage, layout);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
     }
 
     /// This function takes as argument the argument `arg` used in the forward pass, the result
@@ -79,6 +96,29 @@ pub trait CustomOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(
+        &self,
+        s1: &RocmStorage,
+        l1: &Layout,
+        s2: &RocmStorage,
+        l2: &Layout,
+    ) -> Result<(RocmStorage, Shape)> {
+        #[cfg(feature = "rocm")]
+        {
+            s1.custom_op2(l1, s2, l2, self.name(), |s1, l1, s2, l2| {
+                self.cpu_fwd(s1, l1, s2, l2)
+            })
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (s1, l1, s2, l2);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
     }
 
     fn bwd(
@@ -137,6 +177,35 @@ pub trait CustomOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(
+        &self,
+        s1: &RocmStorage,
+        l1: &Layout,
+        s2: &RocmStorage,
+        l2: &Layout,
+        s3: &RocmStorage,
+        l3: &Layout,
+    ) -> Result<(RocmStorage, Shape)> {
+        #[cfg(feature = "rocm")]
+        {
+            s1.custom_op3(
+                l1,
+                (s2, l2),
+                (s3, l3),
+                self.name(),
+                |s1, l1, s2, l2, s3, l3| self.cpu_fwd(s1, l1, s2, l2, s3, l3),
+            )
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (s1, l1, s2, l2, s3, l3);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
     }
 
     fn bwd(
@@ -270,6 +339,23 @@ pub trait InplaceOp1 {
             format!("no metal implementation for {}", self.name()).into(),
         ))
     }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(&self, storage: &mut RocmStorage, layout: &Layout) -> Result<()> {
+        #[cfg(feature = "rocm")]
+        {
+            storage.inplace_custom_op1(layout, self.name(), |storage, layout| {
+                self.cpu_fwd(storage, layout)
+            })
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (storage, layout);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
+    }
 }
 
 pub trait InplaceOp2 {
@@ -300,6 +386,29 @@ pub trait InplaceOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(
+        &self,
+        s1: &mut RocmStorage,
+        l1: &Layout,
+        s2: &RocmStorage,
+        l2: &Layout,
+    ) -> Result<()> {
+        #[cfg(feature = "rocm")]
+        {
+            s1.inplace_custom_op2(l1, s2, l2, self.name(), |s1, l1, s2, l2| {
+                self.cpu_fwd(s1, l1, s2, l2)
+            })
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (s1, l1, s2, l2);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
     }
 }
 
@@ -348,6 +457,35 @@ pub trait InplaceOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass, as run on a ROCm device. The default implementation
+    /// routes through the ROCm backend shim so user-defined ops can opt in to
+    /// native ROCm handling by overriding this method.
+    fn rocm_fwd(
+        &self,
+        s1: &mut RocmStorage,
+        l1: &Layout,
+        s2: &RocmStorage,
+        l2: &Layout,
+        s3: &RocmStorage,
+        l3: &Layout,
+    ) -> Result<()> {
+        #[cfg(feature = "rocm")]
+        {
+            s1.inplace_custom_op3(
+                l1,
+                (s2, l2),
+                (s3, l3),
+                self.name(),
+                |s1, l1, s2, l2, s3, l3| self.cpu_fwd(s1, l1, s2, l2, s3, l3),
+            )
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (s1, l1, s2, l2, s3, l3);
+            Err(crate::Error::NotCompiledWithRocmSupport)
+        }
     }
 }
 

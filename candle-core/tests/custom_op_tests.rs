@@ -145,6 +145,190 @@ fn inplace_op1() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "rocm")]
+struct RocmOverrideOp(f32);
+
+#[cfg(feature = "rocm")]
+impl CustomOp1 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-op1"
+    }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm override op1")
+    }
+
+    fn rocm_fwd(
+        &self,
+        storage: &candle_core::RocmStorage,
+        layout: &Layout,
+    ) -> Result<(candle_core::RocmStorage, Shape)> {
+        Ok((storage.try_clone(layout)?, layout.shape().clone()))
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl candle_core::CustomOp2 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-op2"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm override op2")
+    }
+
+    fn rocm_fwd(
+        &self,
+        s1: &candle_core::RocmStorage,
+        l1: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+    ) -> Result<(candle_core::RocmStorage, Shape)> {
+        Ok((s1.try_clone(l1)?, l1.shape().clone()))
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl candle_core::CustomOp3 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-op3"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm override op3")
+    }
+
+    fn rocm_fwd(
+        &self,
+        s1: &candle_core::RocmStorage,
+        l1: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+    ) -> Result<(candle_core::RocmStorage, Shape)> {
+        Ok((s1.try_clone(l1)?, l1.shape().clone()))
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl candle_core::InplaceOp1 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-inplace-op1"
+    }
+
+    fn cpu_fwd(&self, _: &mut CpuStorage, _: &Layout) -> Result<()> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm inplace op1")
+    }
+
+    fn rocm_fwd(&self, storage: &mut candle_core::RocmStorage, layout: &Layout) -> Result<()> {
+        storage.const_set(candle_core::scalar::Scalar::F32(self.0), layout)
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl candle_core::InplaceOp2 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-inplace-op2"
+    }
+
+    fn cpu_fwd(&self, _: &mut CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<()> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm inplace op2")
+    }
+
+    fn rocm_fwd(
+        &self,
+        storage: &mut candle_core::RocmStorage,
+        layout: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        storage.const_set(candle_core::scalar::Scalar::F32(self.0), layout)
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl candle_core::InplaceOp3 for RocmOverrideOp {
+    fn name(&self) -> &'static str {
+        "rocm-override-inplace-op3"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &mut CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        candle_core::bail!("cpu_fwd should not be used for ROCm inplace op3")
+    }
+
+    fn rocm_fwd(
+        &self,
+        storage: &mut candle_core::RocmStorage,
+        layout: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+        _: &candle_core::RocmStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        storage.const_set(candle_core::scalar::Scalar::F32(self.0), layout)
+    }
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_custom_ops_dispatch_to_rocm_trait_methods() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let lhs = Tensor::from_slice(&[1f32, 2., 3.], 3, &device)?;
+    let rhs = Tensor::from_slice(&[4f32, 5., 6.], 3, &device)?;
+    let third = Tensor::from_slice(&[7f32, 8., 9.], 3, &device)?;
+
+    assert_eq!(
+        lhs.apply_op1_no_bwd(&RocmOverrideOp(0.))?
+            .to_vec1::<f32>()?,
+        vec![1., 2., 3.]
+    );
+    assert_eq!(
+        lhs.apply_op2_no_bwd(&rhs, &RocmOverrideOp(0.))?
+            .to_vec1::<f32>()?,
+        vec![1., 2., 3.]
+    );
+    assert_eq!(
+        lhs.apply_op3_no_bwd(&rhs, &third, &RocmOverrideOp(0.))?
+            .to_vec1::<f32>()?,
+        vec![1., 2., 3.]
+    );
+
+    let inplace = Tensor::zeros(3, DType::F32, &device)?;
+    inplace.inplace_op1(&RocmOverrideOp(11.))?;
+    assert_eq!(inplace.to_vec1::<f32>()?, vec![11., 11., 11.]);
+
+    inplace.inplace_op2(&rhs, &RocmOverrideOp(22.))?;
+    assert_eq!(inplace.to_vec1::<f32>()?, vec![22., 22., 22.]);
+
+    inplace.inplace_op3(&rhs, &third, &RocmOverrideOp(33.))?;
+    assert_eq!(inplace.to_vec1::<f32>()?, vec![33., 33., 33.]);
+
+    Ok(())
+}
+
 #[cfg(all(feature = "ug", any(feature = "cuda", feature = "metal")))]
 #[allow(clippy::approx_constant)]
 #[test]
