@@ -177,6 +177,10 @@ pub enum Error {
     #[error("Metal error {0}")]
     Metal(#[from] MetalError),
 
+    #[cfg(feature = "rocm")]
+    #[error("ROCm error {0}")]
+    Rocm(#[from] candle_rocm_kernels::RocmError),
+
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), feature = "ug"))]
     #[error(transparent)]
     Ug(#[from] candle_ug::Error),

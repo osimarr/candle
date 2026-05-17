@@ -5,6 +5,8 @@
 //! a bring-up shim and intentionally supports `f32` tensors only.
 
 use candle_rocm_kernels as kernels;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
@@ -13,9 +15,29 @@ use crate::{
     Layout, Result, Shape,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct RocmDevice {
-    gpu_id: usize,
+    inner: Arc<kernels::Device>,
+}
+
+impl RocmDevice {
+    fn ordinal(&self) -> usize {
+        self.inner.ordinal()
+    }
+}
+
+impl PartialEq for RocmDevice {
+    fn eq(&self, rhs: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &rhs.inner)
+    }
+}
+
+impl Eq for RocmDevice {}
+
+impl Hash for RocmDevice {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.inner).hash(state)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -436,17 +458,18 @@ impl BackendDevice for RocmDevice {
     type Storage = RocmStorage;
 
     fn new(gpu_id: usize) -> Result<Self> {
-        Ok(Self { gpu_id })
+        let inner = Arc::new(kernels::Device::new(gpu_id)?);
+        Ok(Self { inner })
     }
 
     fn location(&self) -> crate::DeviceLocation {
         crate::DeviceLocation::Rocm {
-            gpu_id: self.gpu_id,
+            gpu_id: self.ordinal(),
         }
     }
 
     fn same_device(&self, rhs: &Self) -> bool {
-        self.gpu_id == rhs.gpu_id
+        Arc::ptr_eq(&self.inner, &rhs.inner)
     }
 
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
@@ -507,14 +530,18 @@ impl BackendDevice for RocmDevice {
     }
 
     fn set_seed(&self, seed: u64) -> Result<()> {
-        kernels::device::set_seed(|| crate::cpu_backend::CpuDevice.set_seed(seed))
+        kernels::device::set_seed(|| {
+            self.inner.set_seed(seed);
+            Ok::<(), Error>(())
+        })
     }
 
     fn get_current_seed(&self) -> Result<u64> {
-        kernels::device::get_current_seed(|| crate::cpu_backend::CpuDevice.get_current_seed())
+        kernels::device::get_current_seed(|| Ok::<u64, Error>(self.inner.get_current_seed()))
     }
 
     fn synchronize(&self) -> Result<()> {
+        self.inner.synchronize()?;
         Ok(())
     }
 }
@@ -561,6 +588,31 @@ mod tests {
 
         let arange = Tensor::arange(0u32, 3u32, &device)?.to_dtype(DType::F32)?;
         assert_eq!(arange.to_vec1::<f32>()?, vec![0., 1., 2.]);
+        Ok(())
+    }
+
+    #[test]
+    fn rocm_device_identity_is_exact() -> crate::Result<()> {
+        let d1 = Device::new_rocm(0)?;
+        let d2 = d1.clone();
+        let d3 = Device::new_rocm(0)?;
+
+        assert!(d1.same_device(&d2));
+        assert!(!d1.same_device(&d3));
+        assert_eq!(d1.location(), d3.location());
+
+        let lhs = Tensor::from_slice(&[1f32, 2.], 2, &d1)?;
+        let rhs = Tensor::from_slice(&[3f32, 4.], 2, &d3)?;
+        assert!(lhs.add(&rhs).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rocm_device_seed_and_sync_use_kernel_device() -> crate::Result<()> {
+        let device = Device::new_rocm(0)?;
+        device.set_seed(42)?;
+        assert_eq!(device.get_current_seed()?, 42);
+        device.synchronize()?;
         Ok(())
     }
 }
