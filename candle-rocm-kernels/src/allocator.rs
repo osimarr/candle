@@ -1,6 +1,7 @@
-use crate::{Buffer, Result};
+use crate::{Buffer, Result, RocmError};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone, Debug)]
 pub struct Allocator {
@@ -8,9 +9,93 @@ pub struct Allocator {
 }
 
 #[derive(Debug)]
-struct AllocatorInner {
+pub(crate) struct AllocatorInner {
     device_ordinal: usize,
     next_buffer_id: AtomicU64,
+    lifecycle: Mutex<LifecycleState>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FreePolicy {
+    #[default]
+    SynchronizeOnDrop,
+    DeferUntilSynchronize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AllocationStats {
+    pub active_allocations: usize,
+    pub active_bytes: usize,
+    pub pending_frees: usize,
+    pub pending_free_bytes: usize,
+    pub total_allocations: u64,
+    pub total_allocated_bytes: usize,
+    pub total_released_allocations: u64,
+    pub total_released_bytes: usize,
+    pub synchronize_count: u64,
+    pub synchronized_frees: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AllocationMeta {
+    bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingFree {
+    bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleState {
+    active: HashMap<u64, AllocationMeta>,
+    pending_frees: Vec<PendingFree>,
+    free_policy: FreePolicy,
+    total_allocations: u64,
+    total_allocated_bytes: usize,
+    total_released_allocations: u64,
+    total_released_bytes: usize,
+    synchronize_count: u64,
+    synchronized_frees: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct AllocationHandle {
+    id: u64,
+    device_ordinal: usize,
+    bytes: usize,
+    allocator: Weak<AllocatorInner>,
+}
+
+impl AllocationHandle {
+    fn new(id: u64, device_ordinal: usize, bytes: usize, allocator: Weak<AllocatorInner>) -> Self {
+        Self {
+            id,
+            device_ordinal,
+            bytes,
+            allocator,
+        }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn device_ordinal(&self) -> usize {
+        self.device_ordinal
+    }
+
+    pub(crate) fn size_in_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for AllocationHandle {
+    fn drop(&mut self) {
+        if let Some(allocator) = self.allocator.upgrade() {
+            allocator.release(self.id, self.bytes);
+        }
+    }
 }
 
 impl Allocator {
@@ -19,6 +104,10 @@ impl Allocator {
             inner: Arc::new(AllocatorInner {
                 device_ordinal,
                 next_buffer_id: AtomicU64::new(1),
+                lifecycle: Mutex::new(LifecycleState {
+                    free_policy: FreePolicy::default(),
+                    ..LifecycleState::default()
+                }),
             }),
         }
     }
@@ -35,8 +124,155 @@ impl Allocator {
         self.allocate_impl(bytes, true)
     }
 
+    pub fn free_policy(&self) -> Result<FreePolicy> {
+        let lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm allocator"))?;
+        Ok(lifecycle.free_policy)
+    }
+
+    pub fn set_free_policy(&self, policy: FreePolicy) -> Result<()> {
+        let mut lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm allocator"))?;
+        lifecycle.free_policy = policy;
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Result<AllocationStats> {
+        self.inner.stats()
+    }
+
+    pub fn synchronize(&self) -> Result<()> {
+        self.inner.synchronize()
+    }
+
     fn allocate_impl(&self, bytes: usize, zeroed: bool) -> Result<Buffer> {
         let id = self.inner.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        Buffer::new(id, self.device_ordinal(), bytes, zeroed)
+        let allocation = self.inner.register_allocation(id, bytes)?;
+        Buffer::new(allocation, zeroed)
+    }
+}
+
+impl AllocatorInner {
+    fn register_allocation(self: &Arc<Self>, id: u64, bytes: usize) -> Result<AllocationHandle> {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm allocator"))?;
+        lifecycle.active.insert(id, AllocationMeta { bytes });
+        lifecycle.total_allocations += 1;
+        lifecycle.total_allocated_bytes += bytes;
+        Ok(AllocationHandle::new(
+            id,
+            self.device_ordinal,
+            bytes,
+            Arc::downgrade(self),
+        ))
+    }
+
+    fn release(&self, id: u64, bytes: usize) {
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            return;
+        };
+        let bytes = lifecycle
+            .active
+            .remove(&id)
+            .map(|meta| meta.bytes)
+            .unwrap_or(bytes);
+        lifecycle.total_released_allocations += 1;
+        lifecycle.total_released_bytes += bytes;
+        match lifecycle.free_policy {
+            FreePolicy::SynchronizeOnDrop => {
+                lifecycle.synchronized_frees += 1;
+            }
+            FreePolicy::DeferUntilSynchronize => {
+                lifecycle.pending_frees.push(PendingFree { bytes });
+            }
+        }
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm allocator"))?;
+        lifecycle.synchronize_count += 1;
+        lifecycle.synchronized_frees += lifecycle.pending_frees.len() as u64;
+        lifecycle.pending_frees.clear();
+        Ok(())
+    }
+
+    fn stats(&self) -> Result<AllocationStats> {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm allocator"))?;
+        Ok(AllocationStats {
+            active_allocations: lifecycle.active.len(),
+            active_bytes: lifecycle.active.values().map(|meta| meta.bytes).sum(),
+            pending_frees: lifecycle.pending_frees.len(),
+            pending_free_bytes: lifecycle
+                .pending_frees
+                .iter()
+                .map(|pending| pending.bytes)
+                .sum(),
+            total_allocations: lifecycle.total_allocations,
+            total_allocated_bytes: lifecycle.total_allocated_bytes,
+            total_released_allocations: lifecycle.total_released_allocations,
+            total_released_bytes: lifecycle.total_released_bytes,
+            synchronize_count: lifecycle.synchronize_count,
+            synchronized_frees: lifecycle.synchronized_frees,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Allocator, FreePolicy};
+
+    #[test]
+    fn allocator_tracks_active_and_released_buffers() {
+        let allocator = Allocator::new(0);
+        let buffer = allocator.allocate(16).unwrap();
+        let stats = allocator.stats().unwrap();
+        assert_eq!(stats.active_allocations, 1);
+        assert_eq!(stats.active_bytes, 16);
+        assert_eq!(stats.total_allocations, 1);
+
+        drop(buffer);
+        let stats = allocator.stats().unwrap();
+        assert_eq!(stats.active_allocations, 0);
+        assert_eq!(stats.pending_frees, 0);
+        assert_eq!(stats.total_released_allocations, 1);
+        assert_eq!(stats.total_released_bytes, 16);
+        assert_eq!(stats.synchronized_frees, 1);
+    }
+
+    #[test]
+    fn deferred_free_policy_reclaims_on_synchronize() {
+        let allocator = Allocator::new(0);
+        allocator
+            .set_free_policy(FreePolicy::DeferUntilSynchronize)
+            .unwrap();
+        let buffer = allocator.allocate(24).unwrap();
+        drop(buffer);
+
+        let stats = allocator.stats().unwrap();
+        assert_eq!(stats.active_allocations, 0);
+        assert_eq!(stats.pending_frees, 1);
+        assert_eq!(stats.pending_free_bytes, 24);
+        assert_eq!(stats.synchronized_frees, 0);
+
+        allocator.synchronize().unwrap();
+        let stats = allocator.stats().unwrap();
+        assert_eq!(stats.pending_frees, 0);
+        assert_eq!(stats.pending_free_bytes, 0);
+        assert_eq!(stats.synchronize_count, 1);
+        assert_eq!(stats.synchronized_frees, 1);
     }
 }

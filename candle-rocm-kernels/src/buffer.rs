@@ -1,4 +1,4 @@
-use crate::{KernelDType, Result, RocmError};
+use crate::{allocator::AllocationHandle, KernelDType, Result, RocmError};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -7,9 +7,7 @@ pub struct Buffer {
 }
 
 struct BufferInner {
-    id: u64,
-    device_ordinal: usize,
-    bytes: usize,
+    allocation: AllocationHandle,
     data: Mutex<Vec<u8>>,
 }
 
@@ -25,7 +23,8 @@ impl std::fmt::Debug for Buffer {
 }
 
 impl Buffer {
-    pub(crate) fn new(id: u64, device_ordinal: usize, bytes: usize, zeroed: bool) -> Result<Self> {
+    pub(crate) fn new(allocation: AllocationHandle, zeroed: bool) -> Result<Self> {
+        let bytes = allocation.size_in_bytes();
         let data = if zeroed {
             vec![0; bytes]
         } else {
@@ -35,24 +34,22 @@ impl Buffer {
         };
         Ok(Self {
             inner: Arc::new(BufferInner {
-                id,
-                device_ordinal,
-                bytes,
+                allocation,
                 data: Mutex::new(data),
             }),
         })
     }
 
     pub fn id(&self) -> u64 {
-        self.inner.id
+        self.inner.allocation.id()
     }
 
     pub fn device_ordinal(&self) -> usize {
-        self.inner.device_ordinal
+        self.inner.allocation.device_ordinal()
     }
 
     pub fn size_in_bytes(&self) -> usize {
-        self.inner.bytes
+        self.inner.allocation.size_in_bytes()
     }
 
     pub fn strong_count(&self) -> usize {
@@ -192,12 +189,12 @@ impl<'a> BufferView<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Buffer;
-    use crate::{KernelDType, RocmError};
+    use crate::{Allocator, KernelDType, RocmError};
 
     #[test]
     fn view_checks_bounds() {
-        let buffer = Buffer::new(1, 0, 8, true).unwrap();
+        let allocator = Allocator::new(0);
+        let buffer = allocator.allocate_zeroed(8).unwrap();
         assert!(buffer.view(4, 4, KernelDType::F32).is_ok());
         assert!(matches!(
             buffer.view(5, 4, KernelDType::F32),
@@ -207,7 +204,8 @@ mod tests {
 
     #[test]
     fn clone_tracks_shared_ownership() {
-        let buffer = Buffer::new(1, 0, 8, true).unwrap();
+        let allocator = Allocator::new(0);
+        let buffer = allocator.allocate_zeroed(8).unwrap();
         assert!(buffer.is_unique());
         let _clone = buffer.clone();
         assert!(!buffer.is_unique());

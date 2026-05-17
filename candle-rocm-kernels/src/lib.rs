@@ -13,7 +13,7 @@ mod error;
 mod runtime_device;
 mod stream;
 
-pub use allocator::Allocator;
+pub use allocator::{AllocationStats, Allocator, FreePolicy};
 pub use buffer::{Buffer, BufferView};
 pub use dtype::KernelDType;
 pub use error::{Result, RocmError};

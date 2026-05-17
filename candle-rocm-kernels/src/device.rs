@@ -75,13 +75,14 @@ impl Device {
     }
 
     pub fn synchronize(&self) -> Result<()> {
-        Ok(())
+        self.allocator().synchronize()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Device;
+    use crate::FreePolicy;
 
     #[test]
     fn host_copy_round_trip() {
@@ -109,5 +110,22 @@ mod tests {
         assert!(d1.same_device(&d2));
         assert!(!d1.same_device(&d3));
         assert!(d1.same_ordinal(&d3));
+    }
+
+    #[test]
+    fn synchronize_reclaims_deferred_frees() {
+        let device = Device::new(0).unwrap();
+        device
+            .allocator()
+            .set_free_policy(FreePolicy::DeferUntilSynchronize)
+            .unwrap();
+        let buffer = device.allocate(8).unwrap();
+        drop(buffer);
+        assert_eq!(device.allocator().stats().unwrap().pending_frees, 1);
+
+        device.synchronize().unwrap();
+        let stats = device.allocator().stats().unwrap();
+        assert_eq!(stats.pending_frees, 0);
+        assert_eq!(stats.synchronize_count, 1);
     }
 }
