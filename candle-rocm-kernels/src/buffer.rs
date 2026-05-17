@@ -1,0 +1,218 @@
+use crate::{KernelDType, Result, RocmError};
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+pub struct Buffer {
+    inner: Arc<BufferInner>,
+}
+
+struct BufferInner {
+    id: u64,
+    device_ordinal: usize,
+    bytes: usize,
+    data: Mutex<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer")
+            .field("id", &self.id())
+            .field("device_ordinal", &self.device_ordinal())
+            .field("bytes", &self.size_in_bytes())
+            .field("strong_count", &self.strong_count())
+            .finish()
+    }
+}
+
+impl Buffer {
+    pub(crate) fn new(id: u64, device_ordinal: usize, bytes: usize, zeroed: bool) -> Result<Self> {
+        if bytes == 0 {
+            return Err(RocmError::InvalidAllocationSize { bytes });
+        }
+        let data = if zeroed {
+            vec![0; bytes]
+        } else {
+            // This is a host-backed placeholder until real HIP allocation lands.
+            // Keep it initialized so the shim remains safe.
+            vec![0; bytes]
+        };
+        Ok(Self {
+            inner: Arc::new(BufferInner {
+                id,
+                device_ordinal,
+                bytes,
+                data: Mutex::new(data),
+            }),
+        })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    pub fn device_ordinal(&self) -> usize {
+        self.inner.device_ordinal
+    }
+
+    pub fn size_in_bytes(&self) -> usize {
+        self.inner.bytes
+    }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+
+    pub fn is_unique(&self) -> bool {
+        self.strong_count() == 1
+    }
+
+    pub fn view(
+        &self,
+        byte_offset: usize,
+        bytes: usize,
+        dtype: KernelDType,
+    ) -> Result<BufferView<'_>> {
+        BufferView::new(self, byte_offset, bytes, dtype)
+    }
+
+    pub fn view_for_elems(
+        &self,
+        byte_offset: usize,
+        elem_count: usize,
+        dtype: KernelDType,
+    ) -> Result<BufferView<'_>> {
+        BufferView::for_elems(self, byte_offset, elem_count, dtype)
+    }
+
+    pub(crate) fn read_all(&self, dst: &mut [u8]) -> Result<()> {
+        self.check_bounds(0, dst.len())?;
+        let data = self
+            .inner
+            .data
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
+        dst.copy_from_slice(&data[..dst.len()]);
+        Ok(())
+    }
+
+    pub(crate) fn write_all(&self, src: &[u8]) -> Result<()> {
+        self.check_bounds(0, src.len())?;
+        let mut data = self
+            .inner
+            .data
+            .lock()
+            .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
+        data[..src.len()].copy_from_slice(src);
+        Ok(())
+    }
+
+    pub(crate) fn check_device(&self, device_ordinal: usize, op: &'static str) -> Result<()> {
+        if self.device_ordinal() == device_ordinal {
+            Ok(())
+        } else {
+            Err(RocmError::DeviceMismatch {
+                expected: device_ordinal,
+                got: self.device_ordinal(),
+                op,
+            })
+        }
+    }
+
+    fn check_bounds(&self, offset: usize, bytes: usize) -> Result<()> {
+        let end = offset
+            .checked_add(bytes)
+            .ok_or(RocmError::BufferOutOfBounds {
+                buffer_bytes: self.size_in_bytes(),
+                offset,
+                requested: bytes,
+            })?;
+        if end <= self.size_in_bytes() {
+            Ok(())
+        } else {
+            Err(RocmError::BufferOutOfBounds {
+                buffer_bytes: self.size_in_bytes(),
+                offset,
+                requested: bytes,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferView<'a> {
+    buffer: &'a Buffer,
+    byte_offset: usize,
+    bytes: usize,
+    dtype: KernelDType,
+}
+
+impl<'a> BufferView<'a> {
+    pub fn new(
+        buffer: &'a Buffer,
+        byte_offset: usize,
+        bytes: usize,
+        dtype: KernelDType,
+    ) -> Result<Self> {
+        buffer.check_bounds(byte_offset, bytes)?;
+        Ok(Self {
+            buffer,
+            byte_offset,
+            bytes,
+            dtype,
+        })
+    }
+
+    pub fn for_elems(
+        buffer: &'a Buffer,
+        byte_offset: usize,
+        elem_count: usize,
+        dtype: KernelDType,
+    ) -> Result<Self> {
+        Self::new(
+            buffer,
+            byte_offset,
+            dtype.storage_size_in_bytes(elem_count),
+            dtype,
+        )
+    }
+
+    pub fn buffer(&self) -> &'a Buffer {
+        self.buffer
+    }
+
+    pub fn byte_offset(&self) -> usize {
+        self.byte_offset
+    }
+
+    pub fn size_in_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn dtype(&self) -> KernelDType {
+        self.dtype
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Buffer;
+    use crate::{KernelDType, RocmError};
+
+    #[test]
+    fn view_checks_bounds() {
+        let buffer = Buffer::new(1, 0, 8, true).unwrap();
+        assert!(buffer.view(4, 4, KernelDType::F32).is_ok());
+        assert!(matches!(
+            buffer.view(5, 4, KernelDType::F32),
+            Err(RocmError::BufferOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn clone_tracks_shared_ownership() {
+        let buffer = Buffer::new(1, 0, 8, true).unwrap();
+        assert!(buffer.is_unique());
+        let _clone = buffer.clone();
+        assert!(!buffer.is_unique());
+    }
+}

@@ -5,10 +5,25 @@
 //! fallback closure until real ROCm kernels are implemented behind these entry
 //! points.
 
+mod allocator;
+mod buffer;
+mod dtype;
+mod error;
+#[path = "device.rs"]
+mod runtime_device;
+mod stream;
+
+pub use allocator::Allocator;
+pub use buffer::{Buffer, BufferView};
+pub use dtype::KernelDType;
+pub use error::{Result, RocmError};
+pub use runtime_device::Device;
+pub use stream::Stream;
+
 #[inline]
-pub fn cpu_fallback<T, E, F>(_op: &'static str, fallback: F) -> Result<T, E>
+pub fn cpu_fallback<T, E, F>(_op: &'static str, fallback: F) -> std::result::Result<T, E>
 where
-    F: FnOnce() -> Result<T, E>,
+    F: FnOnce() -> std::result::Result<T, E>,
 {
     fallback()
 }
@@ -17,9 +32,9 @@ macro_rules! fallback_fns {
     ($($name:ident),* $(,)?) => {
         $(
             #[inline]
-            pub fn $name<T, E, F>(fallback: F) -> Result<T, E>
+            pub fn $name<T, E, F>(fallback: F) -> std::result::Result<T, E>
             where
-                F: FnOnce() -> Result<T, E>,
+                F: FnOnce() -> std::result::Result<T, E>,
             {
                 super::cpu_fallback(stringify!($name), fallback)
             }
