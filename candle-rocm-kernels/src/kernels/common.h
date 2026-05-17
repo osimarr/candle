@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 
 extern thread_local char HIP_LAST_ERROR[1024];
@@ -77,6 +78,37 @@ __device__ inline size_t storage_index(
     const DeviceLayout& layout,
     size_t start_offset) {
     return storage_index(logical_index, layout.dims, layout.strides, layout.rank, start_offset);
+}
+
+__device__ inline uint16_t f32_to_bf16_bits(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    const uint32_t lsb = (bits >> 16) & 1U;
+    const uint32_t rounding_bias = 0x7fffU + lsb;
+    return static_cast<uint16_t>((bits + rounding_bias) >> 16);
+}
+
+__device__ inline float bf16_bits_to_f32(uint16_t value) {
+    return __uint_as_float(static_cast<uint32_t>(value) << 16);
+}
+
+template <typename T>
+__device__ inline float to_f32(T value) {
+    return static_cast<float>(value);
+}
+
+template <>
+__device__ inline float to_f32<uint16_t>(uint16_t value) {
+    return bf16_bits_to_f32(value);
+}
+
+template <typename T>
+__device__ inline T from_f32(float value) {
+    return static_cast<T>(value);
+}
+
+template <>
+__device__ inline uint16_t from_f32<uint16_t>(float value) {
+    return f32_to_bf16_bits(value);
 }
 
 inline dim3 grid_for(size_t elem_count) {

@@ -44,14 +44,15 @@ __device__ size_t reduce_offset(
     return offset;
 }
 
-__global__ void reduce_f32_kernel(
+template <typename T>
+__global__ void reduce_kernel(
     int op,
-    const float* src,
+    const T* src,
     DeviceLayout layout,
     size_t start_offset,
     uint64_t reduce_mask,
     size_t reduce_count,
-    float* dst,
+    T* dst,
     uint32_t* dst_u32,
     size_t elem_count) {
     const size_t logical_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -64,16 +65,16 @@ __global__ void reduce_f32_kernel(
     if (op == 1) {
         float acc = 0.0f;
         for (size_t r = 0; r < reduce_count; ++r) {
-            acc += src[base + reduce_offset(r, layout, reduce_mask)];
+            acc += to_f32(src[base + reduce_offset(r, layout, reduce_mask)]);
         }
-        dst[logical_index] = acc;
+        dst[logical_index] = from_f32<T>(acc);
         return;
     }
 
-    float best = src[base];
+    float best = to_f32(src[base]);
     uint32_t best_index = 0;
     for (size_t r = 1; r < reduce_count; ++r) {
-        const float value = src[base + reduce_offset(r, layout, reduce_mask)];
+        const float value = to_f32(src[base + reduce_offset(r, layout, reduce_mask)]);
         const bool update_min = (op == 2 || op == 4) && value < best;
         const bool update_max = (op == 3 || op == 5) && value > best;
         if (update_min || update_max) {
@@ -84,7 +85,7 @@ __global__ void reduce_f32_kernel(
     if (op == 4 || op == 5) {
         dst_u32[logical_index] = best_index;
     } else {
-        dst[logical_index] = best;
+        dst[logical_index] = from_f32<T>(best);
     }
 }
 
@@ -114,7 +115,7 @@ extern "C" int hip_reduce_f32(
     return launch_1d(
         "reduce_f32",
         elem_count,
-        reduce_f32_kernel,
+        reduce_kernel<float>,
         op,
         src,
         layout,
@@ -122,6 +123,42 @@ extern "C" int hip_reduce_f32(
         reduce_mask,
         reduce_count,
         static_cast<float*>(dst),
+        static_cast<uint32_t*>(dst),
+        elem_count);
+}
+
+extern "C" int hip_reduce_bf16(
+    int ordinal,
+    int op,
+    const uint16_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint64_t reduce_mask,
+    size_t reduce_count,
+    void* dst,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "reduce_bf16",
+        elem_count,
+        reduce_kernel<uint16_t>,
+        op,
+        src,
+        layout,
+        start_offset,
+        reduce_mask,
+        reduce_count,
+        static_cast<uint16_t*>(dst),
         static_cast<uint32_t*>(dst),
         elem_count);
 }

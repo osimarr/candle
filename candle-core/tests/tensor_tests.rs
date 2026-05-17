@@ -219,6 +219,25 @@ fn asort(device: &Device) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_argsort() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let data = &[[3f32, 1., 4., 1.1, 5.], [2.1, 1., 7., 8., 2.]];
+    let tensor = Tensor::new(data, &device)?.to_dtype(DType::BF16)?;
+    let indexes = tensor.arg_sort_last_dim(true)?;
+    assert_eq!(
+        indexes.to_vec2::<u32>()?,
+        [[1, 3, 0, 2, 4], [1, 4, 0, 2, 3]],
+    );
+    let indexes = tensor.arg_sort_last_dim(false)?;
+    assert_eq!(
+        indexes.to_vec2::<u32>()?,
+        [[4, 2, 0, 3, 1], [3, 2, 0, 4, 1]],
+    );
+    Ok(())
+}
+
 /// Test sorting a large tensor that exceeds 1024 elements.
 fn asort_big(device: &Device) -> Result<()> {
     // Skip on metal for now
@@ -1047,6 +1066,164 @@ fn index_select(device: &Device) -> Result<()> {
         let hs = t.index_select(&ids, 1)?;
         assert_eq!(hs.to_vec2::<f32>()?, &[[2.0, 1.0, 2.0], [4.0, 3.0, 4.0]]);
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_index_select() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let ids = Tensor::new(&[0u32, 2u32, 1u32], &device)?;
+    let t =
+        Tensor::new(&[[0f32, 1f32], [2f32, 3f32], [4f32, 5f32]], &device)?.to_dtype(DType::BF16)?;
+    let hs = t.index_select(&ids, 0)?;
+    assert!(hs.device().is_rocm());
+    assert_eq!(hs.dtype(), DType::BF16);
+    assert_eq!(
+        hs.to_vec2::<half::bf16>()?,
+        &[
+            [half::bf16::from_f32(0.0), half::bf16::from_f32(1.0)],
+            [half::bf16::from_f32(4.0), half::bf16::from_f32(5.0)],
+            [half::bf16::from_f32(2.0), half::bf16::from_f32(3.0)]
+        ]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_matmul_and_binary() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let lhs = Tensor::new(&[[1f32, 2., 3.], [4., 5., 6.]], &device)?.to_dtype(DType::BF16)?;
+    let rhs = Tensor::new(&[[1f32, 2.], [3., 4.], [5., 6.]], &device)?.to_dtype(DType::BF16)?;
+    let mm = lhs.matmul(&rhs)?;
+    assert!(mm.device().is_rocm());
+    assert_eq!(mm.dtype(), DType::BF16);
+    assert_eq!(
+        mm.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[22.0, 28.0], [49.0, 64.0]]
+    );
+
+    let added = (&mm + &mm)?;
+    assert!(added.device().is_rocm());
+    assert_eq!(added.dtype(), DType::BF16);
+    assert_eq!(
+        added.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[44.0, 56.0], [98.0, 128.0]]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_core_dispatches() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let x = Tensor::new(&[[1f32, 2.], [3., 4.]], &device)?.to_dtype(DType::BF16)?;
+
+    let affine = x.affine(2., -1.)?;
+    assert_eq!(affine.dtype(), DType::BF16);
+    assert_eq!(
+        affine.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[1., 3.], [5., 7.]]
+    );
+
+    let pow = x.powf(2.)?;
+    assert_eq!(pow.dtype(), DType::BF16);
+    assert_eq!(
+        pow.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[1., 4.], [9., 16.]]
+    );
+
+    let elu = Tensor::new(&[-1f32, 0.5], &device)?
+        .to_dtype(DType::BF16)?
+        .elu(1.)?;
+    assert_eq!(elu.dtype(), DType::BF16);
+    let elu = elu.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    assert!((elu[0] + 0.6328125).abs() < 0.01);
+    assert_eq!(elu[1], 0.5);
+
+    let sum = x.sum_keepdim(1)?;
+    assert_eq!(sum.dtype(), DType::BF16);
+    assert_eq!(sum.to_dtype(DType::F32)?.to_vec2::<f32>()?, &[[3.], [7.]]);
+    let max = x.max_keepdim(0)?;
+    assert_eq!(max.dtype(), DType::BF16);
+    assert_eq!(max.to_dtype(DType::F32)?.to_vec2::<f32>()?, &[[3., 4.]]);
+
+    let cmp_rhs = Tensor::new(&[[2f32, 2.], [2., 2.]], &device)?.to_dtype(DType::BF16)?;
+    let cmp = x.gt(&cmp_rhs)?;
+    assert_eq!(cmp.dtype(), DType::U8);
+    assert_eq!(cmp.to_vec2::<u8>()?, &[[0, 0], [1, 1]]);
+
+    let mask = Tensor::new(&[[1u8, 0], [0, 1]], &device)?;
+    let on_true = Tensor::new(&[[10f32, 20.], [30., 40.]], &device)?.to_dtype(DType::BF16)?;
+    let on_false = Tensor::new(&[[1f32, 2.], [3., 4.]], &device)?.to_dtype(DType::BF16)?;
+    let selected = mask.where_cond(&on_true, &on_false)?;
+    assert_eq!(selected.dtype(), DType::BF16);
+    assert_eq!(
+        selected.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[10., 2.], [3., 40.]]
+    );
+
+    let gather_src =
+        Tensor::new(&[[10f32, 20., 30.], [40., 50., 60.]], &device)?.to_dtype(DType::BF16)?;
+    let gather_ids = Tensor::new(&[[2u32, 0], [1, 2]], &device)?;
+    let gathered = gather_src.gather(&gather_ids, 1)?;
+    assert_eq!(gathered.dtype(), DType::BF16);
+    assert_eq!(
+        gathered.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[30., 10.], [50., 60.]]
+    );
+
+    let init = Tensor::ones((2, 2), DType::BF16, &device)?;
+    let index_ids = Tensor::new(&[1u32, 0], &device)?;
+    let add_src = Tensor::new(&[[2f32, 3.], [4., 5.]], &device)?.to_dtype(DType::BF16)?;
+    let added = init.index_add(&index_ids, &add_src, 1)?;
+    assert_eq!(added.dtype(), DType::BF16);
+    assert_eq!(
+        added.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[4., 3.], [6., 5.]]
+    );
+
+    let scatter_ids = Tensor::new(&[[1u32, 0], [0, 1]], &device)?;
+    let scattered =
+        Tensor::zeros((2, 2), DType::BF16, &device)?.scatter(&scatter_ids, &add_src, 1)?;
+    assert_eq!(scattered.dtype(), DType::BF16);
+    assert_eq!(
+        scattered.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        &[[3., 2.], [4., 5.]]
+    );
+
+    let image = Tensor::new(&[[[[1f32, 2.], [3., 4.]]]], &device)?.to_dtype(DType::BF16)?;
+    let pooled = image.avg_pool2d((2, 2))?;
+    assert_eq!(pooled.dtype(), DType::BF16);
+    assert_eq!(
+        pooled
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?,
+        &[2.5]
+    );
+
+    let upsampled = Tensor::new(&[[[1f32, 2.]]], &device)?
+        .to_dtype(DType::BF16)?
+        .upsample_nearest1d(4)?;
+    assert_eq!(upsampled.dtype(), DType::BF16);
+    assert_eq!(
+        upsampled.to_dtype(DType::F32)?.to_vec3::<f32>()?,
+        &[[[1., 1., 2., 2.]]]
+    );
+
+    let conv_input = Tensor::new(&[[[1f32, 2., 3.]]], &device)?.to_dtype(DType::BF16)?;
+    let conv_kernel = Tensor::new(&[[[1f32, 2.]]], &device)?.to_dtype(DType::BF16)?;
+    let conv = conv_input.conv1d(&conv_kernel, 0, 1, 1, 1)?;
+    assert_eq!(conv.dtype(), DType::BF16);
+    assert_eq!(conv.to_dtype(DType::F32)?.to_vec3::<f32>()?, &[[[5., 8.]]]);
+
+    let random_uniform = x.rand_like(0., 1.)?;
+    assert_eq!(random_uniform.dtype(), DType::BF16);
+    let random_normal = x.randn_like(0., 1.)?;
+    assert_eq!(random_normal.dtype(), DType::BF16);
 
     Ok(())
 }

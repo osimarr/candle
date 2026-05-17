@@ -18,9 +18,9 @@ __device__ bool is_missing_index<int64_t>(int64_t value) {
     return value == std::numeric_limits<int64_t>::max();
 }
 
-template <typename I>
-__global__ void index_select_f32_kernel(
-    const float* src,
+template <typename T, typename I>
+__global__ void index_select_kernel(
+    const T* src,
     DeviceLayout src_layout,
     size_t src_start_offset,
     const I* ids,
@@ -28,7 +28,7 @@ __global__ void index_select_f32_kernel(
     size_t ids_stride,
     size_t dim,
     size_t n_ids,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     const size_t logical_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (logical_index >= elem_count) {
@@ -52,23 +52,23 @@ __global__ void index_select_f32_kernel(
 
     const I raw_index = ids[ids_start_offset + selected_id_pos * ids_stride];
     if (is_missing_index<I>(raw_index)) {
-        dst[logical_index] = 0.0f;
+        dst[logical_index] = T{};
         return;
     }
     const size_t selected = static_cast<size_t>(raw_index);
     dst[logical_index] = src[src_index + selected * src_layout.strides[dim]];
 }
 
-template <typename I>
-__global__ void gather_f32_kernel(
-    const float* src,
+template <typename T, typename I>
+__global__ void gather_kernel(
+    const T* src,
     DeviceLayout src_layout,
     size_t src_start_offset,
     const I* ids,
     DeviceLayout ids_layout,
     size_t ids_start_offset,
     size_t dim,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     const size_t logical_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (logical_index >= elem_count) {
@@ -78,7 +78,7 @@ __global__ void gather_f32_kernel(
     const size_t ids_index = storage_index(logical_index, ids_layout, ids_start_offset);
     const I raw_index = ids[ids_index];
     if (is_missing_index<I>(raw_index)) {
-        dst[logical_index] = 0.0f;
+        dst[logical_index] = T{};
         return;
     }
 
@@ -94,16 +94,16 @@ __global__ void gather_f32_kernel(
     dst[logical_index] = src[src_index];
 }
 
-template <typename I>
-__global__ void scatter_f32_kernel(
+template <typename T, typename I>
+__global__ void scatter_kernel(
     int add,
-    float* dst,
+    T* dst,
     DeviceLayout dst_layout,
     size_t dst_start_offset,
     const I* ids,
     DeviceLayout ids_layout,
     size_t ids_start_offset,
-    const float* src,
+    const T* src,
     DeviceLayout src_layout,
     size_t src_start_offset,
     size_t dim,
@@ -117,7 +117,7 @@ __global__ void scatter_f32_kernel(
         dst_logical_index,
         dst_layout,
         dst_start_offset);
-    float value = dst[dst_storage_index];
+    float value = to_f32(dst[dst_storage_index]);
 
     for (size_t src_logical_index = 0; src_logical_index < src_elem_count;
          ++src_logical_index) {
@@ -149,10 +149,10 @@ __global__ void scatter_f32_kernel(
             }
         }
         if (matches) {
-            const float src_value = src[storage_index(
+            const float src_value = to_f32(src[storage_index(
                 src_logical_index,
                 src_layout,
-                src_start_offset)];
+                src_start_offset)]);
             if (add) {
                 value += src_value;
             } else {
@@ -160,32 +160,32 @@ __global__ void scatter_f32_kernel(
             }
         }
     }
-    dst[dst_storage_index] = value;
+    dst[dst_storage_index] = from_f32<T>(value);
 }
 
-template <typename I>
-__global__ void index_add_f32_kernel(
-    const float* input,
+template <typename T, typename I>
+__global__ void index_add_kernel(
+    const T* input,
     DeviceLayout input_layout,
     size_t input_start_offset,
     const I* ids,
     size_t ids_start_offset,
     size_t ids_stride,
     size_t ids_len,
-    const float* src,
+    const T* src,
     DeviceLayout src_layout,
     size_t src_start_offset,
     size_t dim,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     const size_t logical_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (logical_index >= elem_count) {
         return;
     }
-    float value = input[storage_index(
+    float value = to_f32(input[storage_index(
         logical_index,
         input_layout,
-        input_start_offset)];
+        input_start_offset)]);
 
     size_t dst_dim_coord = logical_index;
     for (size_t rev = 0; rev < input_layout.rank; ++rev) {
@@ -211,16 +211,16 @@ __global__ void index_add_f32_kernel(
             tmp /= input_layout.dims[axis];
             src_index += (axis == dim ? id_pos : coord) * src_layout.strides[axis];
         }
-        value += src[src_index];
+        value += to_f32(src[src_index]);
     }
-    dst[logical_index] = value;
+    dst[logical_index] = from_f32<T>(value);
 }
 
-template <typename I>
-int index_select_f32(
+template <typename T, typename I>
+int index_select(
     const char* name,
     int ordinal,
-    const float* src,
+    const T* src,
     const size_t* src_dims,
     const size_t* src_strides,
     size_t rank,
@@ -230,7 +230,7 @@ int index_select_f32(
     size_t ids_stride,
     size_t dim,
     size_t n_ids,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     int rc = select_device(ordinal);
     if (rc != 0 || elem_count == 0) {
@@ -244,7 +244,7 @@ int index_select_f32(
     return launch_1d(
         name,
         elem_count,
-        index_select_f32_kernel<I>,
+        index_select_kernel<T, I>,
         src,
         src_layout,
         src_start_offset,
@@ -257,11 +257,11 @@ int index_select_f32(
         elem_count);
 }
 
-template <typename I>
-int gather_f32(
+template <typename T, typename I>
+int gather(
     const char* name,
     int ordinal,
-    const float* src,
+    const T* src,
     const size_t* src_dims,
     const size_t* src_strides,
     size_t src_rank,
@@ -272,7 +272,7 @@ int gather_f32(
     size_t ids_rank,
     size_t ids_start_offset,
     size_t dim,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     int rc = select_device(ordinal);
     if (rc != 0 || elem_count == 0) {
@@ -291,7 +291,7 @@ int gather_f32(
     return launch_1d(
         name,
         elem_count,
-        gather_f32_kernel<I>,
+        gather_kernel<T, I>,
         src,
         src_layout,
         src_start_offset,
@@ -303,12 +303,12 @@ int gather_f32(
         elem_count);
 }
 
-template <typename I>
-int scatter_f32(
+template <typename T, typename I>
+int scatter(
     const char* name,
     int ordinal,
     int add,
-    float* dst,
+    T* dst,
     const size_t* dst_dims,
     const size_t* dst_strides,
     size_t dst_rank,
@@ -318,7 +318,7 @@ int scatter_f32(
     const size_t* ids_strides,
     size_t ids_rank,
     size_t ids_start_offset,
-    const float* src,
+    const T* src,
     const size_t* src_dims,
     const size_t* src_strides,
     size_t src_rank,
@@ -348,7 +348,7 @@ int scatter_f32(
     return launch_1d(
         name,
         dst_elem_count,
-        scatter_f32_kernel<I>,
+        scatter_kernel<T, I>,
         add,
         dst,
         dst_layout,
@@ -364,11 +364,11 @@ int scatter_f32(
         dst_elem_count);
 }
 
-template <typename I>
-int index_add_f32(
+template <typename T, typename I>
+int index_add(
     const char* name,
     int ordinal,
-    const float* input,
+    const T* input,
     const size_t* input_dims,
     const size_t* input_strides,
     size_t input_rank,
@@ -377,13 +377,13 @@ int index_add_f32(
     size_t ids_start_offset,
     size_t ids_stride,
     size_t ids_len,
-    const float* src,
+    const T* src,
     const size_t* src_dims,
     const size_t* src_strides,
     size_t src_rank,
     size_t src_start_offset,
     size_t dim,
-    float* dst,
+    T* dst,
     size_t elem_count) {
     int rc = select_device(ordinal);
     if (rc != 0 || elem_count == 0) {
@@ -402,7 +402,7 @@ int index_add_f32(
     return launch_1d(
         name,
         elem_count,
-        index_add_f32_kernel<I>,
+        index_add_kernel<T, I>,
         input,
         input_layout,
         input_start_offset,
@@ -434,7 +434,7 @@ extern "C" int hip_index_select_u32_f32(
     size_t n_ids,
     float* dst,
     size_t elem_count) {
-    return index_select_f32(
+    return index_select<float>(
         "index_select_u32_f32",
         ordinal,
         src,
@@ -465,8 +465,70 @@ extern "C" int hip_index_select_i64_f32(
     size_t n_ids,
     float* dst,
     size_t elem_count) {
-    return index_select_f32(
+    return index_select<float>(
         "index_select_i64_f32",
+        ordinal,
+        src,
+        src_dims,
+        src_strides,
+        rank,
+        src_start_offset,
+        ids,
+        ids_start_offset,
+        ids_stride,
+        dim,
+        n_ids,
+        dst,
+        elem_count);
+}
+
+extern "C" int hip_index_select_u32_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t rank,
+    size_t src_start_offset,
+    const uint32_t* ids,
+    size_t ids_start_offset,
+    size_t ids_stride,
+    size_t dim,
+    size_t n_ids,
+    uint16_t* dst,
+    size_t elem_count) {
+    return index_select<uint16_t>(
+        "index_select_u32_bf16",
+        ordinal,
+        src,
+        src_dims,
+        src_strides,
+        rank,
+        src_start_offset,
+        ids,
+        ids_start_offset,
+        ids_stride,
+        dim,
+        n_ids,
+        dst,
+        elem_count);
+}
+
+extern "C" int hip_index_select_i64_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t rank,
+    size_t src_start_offset,
+    const int64_t* ids,
+    size_t ids_start_offset,
+    size_t ids_stride,
+    size_t dim,
+    size_t n_ids,
+    uint16_t* dst,
+    size_t elem_count) {
+    return index_select<uint16_t>(
+        "index_select_i64_bf16",
         ordinal,
         src,
         src_dims,
@@ -497,7 +559,7 @@ extern "C" int hip_gather_u32_f32(
     size_t dim,
     float* dst,
     size_t elem_count) {
-    return gather_f32(
+    return gather<float>(
         "gather_u32_f32",
         ordinal,
         src,
@@ -536,7 +598,7 @@ extern "C" int hip_scatter_u32_f32(
     size_t dim,
     size_t src_elem_count,
     size_t dst_elem_count) {
-    return scatter_f32(
+    return scatter<float>(
         "scatter_u32_f32",
         ordinal,
         add,
@@ -579,8 +641,127 @@ extern "C" int hip_index_add_u32_f32(
     size_t dim,
     float* dst,
     size_t elem_count) {
-    return index_add_f32(
+    return index_add<float>(
         "index_add_u32_f32",
+        ordinal,
+        input,
+        input_dims,
+        input_strides,
+        input_rank,
+        input_start_offset,
+        ids,
+        ids_start_offset,
+        ids_stride,
+        ids_len,
+        src,
+        src_dims,
+        src_strides,
+        src_rank,
+        src_start_offset,
+        dim,
+        dst,
+        elem_count);
+}
+
+extern "C" int hip_gather_u32_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    const uint32_t* ids,
+    const size_t* ids_dims,
+    const size_t* ids_strides,
+    size_t ids_rank,
+    size_t ids_start_offset,
+    size_t dim,
+    uint16_t* dst,
+    size_t elem_count) {
+    return gather<uint16_t>(
+        "gather_u32_bf16",
+        ordinal,
+        src,
+        src_dims,
+        src_strides,
+        src_rank,
+        src_start_offset,
+        ids,
+        ids_dims,
+        ids_strides,
+        ids_rank,
+        ids_start_offset,
+        dim,
+        dst,
+        elem_count);
+}
+
+extern "C" int hip_scatter_u32_bf16(
+    int ordinal,
+    int add,
+    uint16_t* dst,
+    const size_t* dst_dims,
+    const size_t* dst_strides,
+    size_t dst_rank,
+    size_t dst_start_offset,
+    const uint32_t* ids,
+    const size_t* ids_dims,
+    const size_t* ids_strides,
+    size_t ids_rank,
+    size_t ids_start_offset,
+    const uint16_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    size_t dim,
+    size_t src_elem_count,
+    size_t dst_elem_count) {
+    return scatter<uint16_t>(
+        "scatter_u32_bf16",
+        ordinal,
+        add,
+        dst,
+        dst_dims,
+        dst_strides,
+        dst_rank,
+        dst_start_offset,
+        ids,
+        ids_dims,
+        ids_strides,
+        ids_rank,
+        ids_start_offset,
+        src,
+        src_dims,
+        src_strides,
+        src_rank,
+        src_start_offset,
+        dim,
+        src_elem_count,
+        dst_elem_count);
+}
+
+extern "C" int hip_index_add_u32_bf16(
+    int ordinal,
+    const uint16_t* input,
+    const size_t* input_dims,
+    const size_t* input_strides,
+    size_t input_rank,
+    size_t input_start_offset,
+    const uint32_t* ids,
+    size_t ids_start_offset,
+    size_t ids_stride,
+    size_t ids_len,
+    const uint16_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    size_t dim,
+    uint16_t* dst,
+    size_t elem_count) {
+    return index_add<uint16_t>(
+        "index_add_u32_bf16",
         ordinal,
         input,
         input_dims,

@@ -4,7 +4,7 @@ extern crate intel_mkl_src;
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
 
-use candle::{test_device, test_utils::to_vec3_round, Device, IndexOp, Result, Tensor};
+use candle::{test_device, test_utils::to_vec3_round, DType, Device, IndexOp, Result, Tensor};
 
 fn softmax(device: &Device) -> Result<()> {
     let data = &[[[3f32, 1., 4.], [1., 5., 9.]], [[2., 1., 7.], [8., 2., 8.]]];
@@ -322,6 +322,101 @@ fn sigmoid(device: &Device) -> Result<()> {
     let s2 = (1. / (1. + tensor.neg()?.exp()?)?)?;
     let diff = (s1 - s2)?.abs()?.sum_all()?.to_vec0::<f32>()?;
     assert_eq!(diff, 0.);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+fn assert_close_bf16(lhs: &Tensor, rhs: &Tensor, max_mean_diff: f32) -> Result<()> {
+    assert_eq!(lhs.dtype(), DType::BF16);
+    assert_eq!(rhs.dtype(), DType::BF16);
+    let diff = (lhs.to_dtype(DType::F32)? - rhs.to_dtype(DType::F32)?)?
+        .abs()?
+        .sum_all()?
+        .to_vec0::<f32>()?
+        / lhs.elem_count() as f32;
+    assert!(
+        diff <= max_mean_diff,
+        "mean absolute difference {diff} exceeds {max_mean_diff}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_callbacks() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let data = &[[[3f32, 1., 4.], [1., 5., 9.]], [[2., 1., 7.], [8., 2., 8.]]];
+    let tensor_f32 = Tensor::new(data, &device)?;
+    let tensor = tensor_f32.to_dtype(DType::BF16)?;
+
+    let sigmoid = candle_nn::ops::sigmoid(&tensor)?;
+    let sigmoid_expected =
+        candle_nn::ops::sigmoid(&tensor.to_dtype(DType::F32)?)?.to_dtype(DType::BF16)?;
+    assert_close_bf16(&sigmoid, &sigmoid_expected, 0.004)?;
+
+    let logits = tensor_f32.log()?.to_dtype(DType::BF16)?;
+    let softmax = candle_nn::ops::softmax_last_dim(&logits)?;
+    let softmax_expected =
+        candle_nn::ops::softmax_last_dim(&logits.to_dtype(DType::F32)?)?.to_dtype(DType::BF16)?;
+    assert_close_bf16(&softmax, &softmax_expected, 0.004)?;
+
+    let alpha = Tensor::new(&[1f32, 2f32, 3f32], &device)?.to_dtype(DType::BF16)?;
+    let beta = Tensor::new(&[0.5f32, 0f32, -0.2f32], &device)?.to_dtype(DType::BF16)?;
+    let rms = candle_nn::ops::rms_norm(&tensor, &alpha, 1e-5)?;
+    let rms_expected = candle_nn::ops::rms_norm_slow(
+        &tensor.to_dtype(DType::F32)?,
+        &alpha.to_dtype(DType::F32)?,
+        1e-5,
+    )?
+    .to_dtype(DType::BF16)?;
+    assert_close_bf16(&rms, &rms_expected, 0.02)?;
+
+    let layer = candle_nn::ops::layer_norm(&tensor, &alpha, &beta, 1e-5)?;
+    let layer_expected = candle_nn::ops::layer_norm_slow(
+        &tensor.to_dtype(DType::F32)?,
+        &alpha.to_dtype(DType::F32)?,
+        &beta.to_dtype(DType::F32)?,
+        1e-5,
+    )?
+    .to_dtype(DType::BF16)?;
+    assert_close_bf16(&layer, &layer_expected, 0.02)?;
+
+    let (b_size, num_head, seq_len, head_dim) = (2, 2, 3, 4);
+    let src_values = (0..b_size * num_head * seq_len * head_dim)
+        .map(|v| v as f32 / 17.0 - 1.0)
+        .collect::<Vec<_>>();
+    let cos_values = (0..seq_len * head_dim / 2)
+        .map(|v| (v as f32 / 7.0).cos())
+        .collect::<Vec<_>>();
+    let sin_values = (0..seq_len * head_dim / 2)
+        .map(|v| (v as f32 / 7.0).sin())
+        .collect::<Vec<_>>();
+    let src = Tensor::from_vec(src_values, (b_size, num_head, seq_len, head_dim), &device)?
+        .to_dtype(DType::BF16)?;
+    let cos =
+        Tensor::from_vec(cos_values, (seq_len, head_dim / 2), &device)?.to_dtype(DType::BF16)?;
+    let sin =
+        Tensor::from_vec(sin_values, (seq_len, head_dim / 2), &device)?.to_dtype(DType::BF16)?;
+    let src_f32 = src.to_dtype(DType::F32)?;
+    let cos_f32 = cos.to_dtype(DType::F32)?;
+    let sin_f32 = sin.to_dtype(DType::F32)?;
+
+    let rope_i = candle_nn::rotary_emb::rope_i(&src, &cos, &sin)?;
+    let rope_i_expected =
+        candle_nn::rotary_emb::rope_i_slow(&src_f32, &cos_f32, &sin_f32)?.to_dtype(DType::BF16)?;
+    assert_close_bf16(&rope_i, &rope_i_expected, 0.02)?;
+
+    let rope = candle_nn::rotary_emb::rope(&src, &cos, &sin)?;
+    let rope_expected =
+        candle_nn::rotary_emb::rope_slow(&src_f32, &cos_f32, &sin_f32)?.to_dtype(DType::BF16)?;
+    assert_close_bf16(&rope, &rope_expected, 0.02)?;
+
+    let rope_thd = {
+        let src = src.transpose(1, 2)?.contiguous()?;
+        candle_nn::rotary_emb::rope_thd(&src, &cos, &sin)?.transpose(1, 2)?
+    };
+    assert_close_bf16(&rope_thd, &rope_expected, 0.02)?;
+
     Ok(())
 }
 

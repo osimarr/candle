@@ -78,6 +78,7 @@ const HIP_SOURCES: &[&str] = &[
     "src/kernels/binary.cpp",
     "src/kernels/cmp.cpp",
     "src/kernels/scalar.cpp",
+    "src/kernels/cast.cpp",
     "src/kernels/reduce.cpp",
     "src/kernels/random.cpp",
     "src/kernels/conv.cpp",

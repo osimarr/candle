@@ -18,8 +18,9 @@ __device__ float uniform01(uint64_t seed, size_t index) {
     return static_cast<float>(mantissa) * (1.0f / 16777216.0f);
 }
 
-__global__ void random_uniform_f32_kernel(
-    float* dst,
+template <typename T>
+__global__ void random_uniform_kernel(
+    T* dst,
     size_t elem_count,
     uint64_t seed,
     float lo,
@@ -28,11 +29,12 @@ __global__ void random_uniform_f32_kernel(
     if (index >= elem_count) {
         return;
     }
-    dst[index] = lo + uniform01(seed, index) * scale;
+    dst[index] = from_f32<T>(lo + uniform01(seed, index) * scale);
 }
 
-__global__ void random_normal_f32_kernel(
-    float* dst,
+template <typename T>
+__global__ void random_normal_kernel(
+    T* dst,
     size_t elem_count,
     uint64_t seed,
     float mean,
@@ -45,7 +47,7 @@ __global__ void random_normal_f32_kernel(
     const float u2 = uniform01(seed, index * 2 + 1);
     const float radius = sqrtf(-2.0f * logf(u1));
     const float theta = 6.2831853071795864769f * u2;
-    dst[index] = mean + std * radius * cosf(theta);
+    dst[index] = from_f32<T>(mean + std * radius * cosf(theta));
 }
 
 } // namespace
@@ -64,7 +66,7 @@ extern "C" int hip_random_uniform_f32(
     return launch_1d_async(
         "random_uniform_f32",
         elem_count,
-        random_uniform_f32_kernel,
+        random_uniform_kernel<float>,
         dst,
         elem_count,
         seed,
@@ -86,7 +88,51 @@ extern "C" int hip_random_normal_f32(
     return launch_1d_async(
         "random_normal_f32",
         elem_count,
-        random_normal_f32_kernel,
+        random_normal_kernel<float>,
+        dst,
+        elem_count,
+        seed,
+        mean,
+        std);
+}
+
+extern "C" int hip_random_uniform_bf16(
+    int ordinal,
+    uint16_t* dst,
+    size_t elem_count,
+    uint64_t seed,
+    float lo,
+    float up) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    return launch_1d_async(
+        "random_uniform_bf16",
+        elem_count,
+        random_uniform_kernel<uint16_t>,
+        dst,
+        elem_count,
+        seed,
+        lo,
+        up - lo);
+}
+
+extern "C" int hip_random_normal_bf16(
+    int ordinal,
+    uint16_t* dst,
+    size_t elem_count,
+    uint64_t seed,
+    float mean,
+    float std) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    return launch_1d_async(
+        "random_normal_bf16",
+        elem_count,
+        random_normal_kernel<uint16_t>,
         dst,
         elem_count,
         seed,

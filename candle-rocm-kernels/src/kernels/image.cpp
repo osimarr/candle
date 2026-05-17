@@ -1,16 +1,16 @@
 #include "common.h"
 
-#include <algorithm>
 #include <cmath>
 
 namespace {
 
-__global__ void pool2d_f32_kernel(
+template <typename T>
+__global__ void pool2d_kernel(
     int op,
-    const float* src,
+    const T* src,
     DeviceLayout layout,
     size_t start_offset,
-    float* dst,
+    T* dst,
     size_t k_h,
     size_t k_w,
     size_t s_h,
@@ -32,8 +32,8 @@ __global__ void pool2d_f32_kernel(
     const size_t b_idx = tmp;
 
     const size_t base = start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1];
-    float value = src[base + out_h_idx * s_h * layout.strides[2] +
-                      out_w_idx * s_w * layout.strides[3]];
+    float value = to_f32(src[base + out_h_idx * s_h * layout.strides[2] +
+                             out_w_idx * s_w * layout.strides[3]]);
     if (op == 1) {
         value = 0.0f;
     }
@@ -42,7 +42,7 @@ __global__ void pool2d_f32_kernel(
         for (size_t kw = 0; kw < k_w; ++kw) {
             const size_t src_w = out_w_idx * s_w + kw;
             const float current =
-                src[base + src_h * layout.strides[2] + src_w * layout.strides[3]];
+                to_f32(src[base + src_h * layout.strides[2] + src_w * layout.strides[3]]);
             if (op == 1) {
                 value += current;
             } else {
@@ -53,14 +53,15 @@ __global__ void pool2d_f32_kernel(
     if (op == 1) {
         value /= static_cast<float>(k_h * k_w);
     }
-    dst[index] = value;
+    dst[index] = from_f32<T>(value);
 }
 
-__global__ void upsample_nearest1d_f32_kernel(
-    const float* src,
+template <typename T>
+__global__ void upsample_nearest1d_kernel(
+    const T* src,
     DeviceLayout layout,
     size_t start_offset,
-    float* dst,
+    T* dst,
     size_t out_size,
     size_t elem_count) {
     const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,11 +81,12 @@ __global__ void upsample_nearest1d_f32_kernel(
                      src_idx * layout.strides[2]];
 }
 
-__global__ void upsample_nearest2d_f32_kernel(
-    const float* src,
+template <typename T>
+__global__ void upsample_nearest2d_kernel(
+    const T* src,
     DeviceLayout layout,
     size_t start_offset,
-    float* dst,
+    T* dst,
     size_t out_h,
     size_t out_w,
     size_t elem_count) {
@@ -110,11 +112,12 @@ __global__ void upsample_nearest2d_f32_kernel(
                      src_h * layout.strides[2] + src_w * layout.strides[3]];
 }
 
-__global__ void upsample_bilinear2d_f32_kernel(
-    const float* src,
+template <typename T>
+__global__ void upsample_bilinear2d_kernel(
+    const T* src,
     DeviceLayout layout,
     size_t start_offset,
-    float* dst,
+    T* dst,
     size_t out_h,
     size_t out_w,
     double scale_h,
@@ -149,16 +152,16 @@ __global__ void upsample_bilinear2d_f32_kernel(
 
     const size_t base = start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1];
     const double v00 =
-        static_cast<double>(src[base + h0 * layout.strides[2] + w0 * layout.strides[3]]);
+        static_cast<double>(to_f32(src[base + h0 * layout.strides[2] + w0 * layout.strides[3]]));
     const double v10 =
-        static_cast<double>(src[base + h0 * layout.strides[2] + w1 * layout.strides[3]]);
+        static_cast<double>(to_f32(src[base + h0 * layout.strides[2] + w1 * layout.strides[3]]));
     const double v01 =
-        static_cast<double>(src[base + h1 * layout.strides[2] + w0 * layout.strides[3]]);
+        static_cast<double>(to_f32(src[base + h1 * layout.strides[2] + w0 * layout.strides[3]]));
     const double v11 =
-        static_cast<double>(src[base + h1 * layout.strides[2] + w1 * layout.strides[3]]);
+        static_cast<double>(to_f32(src[base + h1 * layout.strides[2] + w1 * layout.strides[3]]));
     const double v_top = v00 * (1.0 - weight_w) + v10 * weight_w;
     const double v_bottom = v01 * (1.0 - weight_w) + v11 * weight_w;
-    dst[index] = static_cast<float>(v_top * (1.0 - weight_h) + v_bottom * weight_h);
+    dst[index] = from_f32<T>(static_cast<float>(v_top * (1.0 - weight_h) + v_bottom * weight_h));
 }
 
 int init_4d_layout(
@@ -202,7 +205,7 @@ extern "C" int hip_pool2d_f32(
     return launch_1d(
         "pool2d_f32",
         elem_count,
-        pool2d_f32_kernel,
+        pool2d_kernel<float>,
         op,
         src,
         layout,
@@ -242,7 +245,7 @@ extern "C" int hip_upsample_nearest1d_f32(
     return launch_1d(
         "upsample_nearest1d_f32",
         elem_count,
-        upsample_nearest1d_f32_kernel,
+        upsample_nearest1d_kernel<float>,
         src,
         layout,
         start_offset,
@@ -274,7 +277,7 @@ extern "C" int hip_upsample_nearest2d_f32(
     return launch_1d(
         "upsample_nearest2d_f32",
         elem_count,
-        upsample_nearest2d_f32_kernel,
+        upsample_nearest2d_kernel<float>,
         src,
         layout,
         start_offset,
@@ -310,7 +313,156 @@ extern "C" int hip_upsample_bilinear2d_f32(
     return launch_1d(
         "upsample_bilinear2d_f32",
         elem_count,
-        upsample_bilinear2d_f32_kernel,
+        upsample_bilinear2d_kernel<float>,
+        src,
+        layout,
+        start_offset,
+        dst,
+        out_h,
+        out_w,
+        scale_h,
+        scale_w,
+        align_corners != 0,
+        elem_count);
+}
+
+extern "C" int hip_pool2d_bf16(
+    int ordinal,
+    int op,
+    const uint16_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint16_t* dst,
+    size_t k_h,
+    size_t k_w,
+    size_t s_h,
+    size_t s_w,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "pool2d_bf16",
+        elem_count,
+        pool2d_kernel<uint16_t>,
+        op,
+        src,
+        layout,
+        start_offset,
+        dst,
+        k_h,
+        k_w,
+        s_h,
+        s_w,
+        out_h,
+        out_w,
+        elem_count);
+}
+
+extern "C" int hip_upsample_nearest1d_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint16_t* dst,
+    size_t out_size,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    if (rank != 3) {
+        return set_error("upsample_nearest1d layout rank", hipErrorInvalidValue);
+    }
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_nearest1d_bf16",
+        elem_count,
+        upsample_nearest1d_kernel<uint16_t>,
+        src,
+        layout,
+        start_offset,
+        dst,
+        out_size,
+        elem_count);
+}
+
+extern "C" int hip_upsample_nearest2d_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint16_t* dst,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_nearest2d_bf16",
+        elem_count,
+        upsample_nearest2d_kernel<uint16_t>,
+        src,
+        layout,
+        start_offset,
+        dst,
+        out_h,
+        out_w,
+        elem_count);
+}
+
+extern "C" int hip_upsample_bilinear2d_bf16(
+    int ordinal,
+    const uint16_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint16_t* dst,
+    size_t out_h,
+    size_t out_w,
+    double scale_h,
+    double scale_w,
+    int align_corners,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_bilinear2d_bf16",
+        elem_count,
+        upsample_bilinear2d_kernel<uint16_t>,
         src,
         layout,
         start_offset,

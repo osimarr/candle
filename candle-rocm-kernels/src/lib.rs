@@ -1,9 +1,9 @@
 //! ROCm kernel dispatch surface for Candle.
 //!
 //! `candle-core` calls into this crate with typed ROCm operation descriptors
-//! first. When compiled with HIP support, the supported f32 operation slice
-//! launches HIP kernels behind these entry points; unsupported operations still
-//! use fallback closures while coverage is expanded.
+//! first. When compiled with HIP support, supported f32 and bf16 operation
+//! slices launch HIP kernels behind these entry points; unsupported operations
+//! still use fallback closures while coverage is expanded.
 
 mod allocator;
 mod buffer;
@@ -88,6 +88,7 @@ pub enum KernelScalar {
     F32(f32),
     U8(u8),
     U32(u32),
+    BF16(u16),
 }
 
 impl KernelScalar {
@@ -96,6 +97,7 @@ impl KernelScalar {
             Self::F32(_) => KernelDType::F32,
             Self::U8(_) => KernelDType::U8,
             Self::U32(_) => KernelDType::U32,
+            Self::BF16(_) => KernelDType::BF16,
         }
     }
 }
@@ -375,7 +377,7 @@ pub mod device {
         }
         #[cfg(hip_runtime)]
         {
-            if op.output.dtype() != KernelDType::F32 {
+            if !matches!(op.output.dtype(), KernelDType::F32 | KernelDType::BF16) {
                 return Ok(None);
             }
             let dst = op.device.allocate(
@@ -383,7 +385,15 @@ pub mod device {
                     .dtype()
                     .storage_size_in_bytes(op.output.elem_count()),
             )?;
-            crate::hip::random_uniform_f32(&dst, op.output.elem_count(), seed, lo, up)?;
+            match op.output.dtype() {
+                KernelDType::F32 => {
+                    crate::hip::random_uniform_f32(&dst, op.output.elem_count(), seed, lo, up)?
+                }
+                KernelDType::BF16 => {
+                    crate::hip::random_uniform_bf16(&dst, op.output.elem_count(), seed, lo, up)?
+                }
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -401,7 +411,7 @@ pub mod device {
         }
         #[cfg(hip_runtime)]
         {
-            if op.output.dtype() != KernelDType::F32 {
+            if !matches!(op.output.dtype(), KernelDType::F32 | KernelDType::BF16) {
                 return Ok(None);
             }
             let dst = op.device.allocate(
@@ -409,7 +419,15 @@ pub mod device {
                     .dtype()
                     .storage_size_in_bytes(op.output.elem_count()),
             )?;
-            crate::hip::random_normal_f32(&dst, op.output.elem_count(), seed, mean, std)?;
+            match op.output.dtype() {
+                KernelDType::F32 => {
+                    crate::hip::random_normal_f32(&dst, op.output.elem_count(), seed, mean, std)?
+                }
+                KernelDType::BF16 => {
+                    crate::hip::random_normal_bf16(&dst, op.output.elem_count(), seed, mean, std)?
+                }
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -433,7 +451,7 @@ pub mod device {
 }
 
 pub mod quantized {
-    use crate::{cpu_fallback, Device, TensorArg};
+    use crate::{cpu_fallback, Buffer, Device, KernelDType, LayoutArg, RocmError, TensorArg};
 
     #[derive(Clone, Debug)]
     pub struct QuantizedOp<'a> {
@@ -515,6 +533,66 @@ pub mod quantized {
         F: FnOnce() -> std::result::Result<T, E>,
     {
         cpu_fallback(op.name, fallback)
+    }
+
+    pub fn supports_native_bf16() -> bool {
+        cfg!(hip_runtime)
+    }
+
+    pub fn try_quantize_bf16(src: &TensorArg, dst: &Buffer) -> crate::Result<bool> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (src, dst);
+            Ok(false)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if dst.size_in_bytes() != KernelDType::BF16.storage_size_in_bytes(src.elem_count()) {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: dst.size_in_bytes(),
+                    offset: 0,
+                    requested: KernelDType::BF16.storage_size_in_bytes(src.elem_count()),
+                });
+            }
+            match src.dtype() {
+                KernelDType::F32 => {
+                    let layout = LayoutArg::new(vec![src.elem_count()], vec![1], 0)?;
+                    crate::hip::cast_f32_to_bf16(src.buffer(), &layout, dst)?;
+                    Ok(true)
+                }
+                KernelDType::BF16 => {
+                    crate::hip::copy_d2d(src.buffer(), dst, dst.size_in_bytes())?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+    }
+
+    pub fn try_dequantize_bf16_to_f32(
+        device: &Device,
+        src: &Buffer,
+        elem_count: usize,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (device, src, elem_count);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if src.size_in_bytes() != KernelDType::BF16.storage_size_in_bytes(elem_count) {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: src.size_in_bytes(),
+                    offset: 0,
+                    requested: KernelDType::BF16.storage_size_in_bytes(elem_count),
+                });
+            }
+            let dst = device.allocate(KernelDType::F32.storage_size_in_bytes(elem_count))?;
+            let layout = LayoutArg::new(vec![elem_count], vec![1], 0)?;
+            crate::hip::cast_bf16_to_f32(src, &layout, &dst)?;
+            Ok(Some(dst))
+        }
     }
 }
 
@@ -742,8 +820,12 @@ pub mod tensor {
             Ok(None)
         }
         #[cfg(hip_runtime)]
-        try_scalar(op, |src, layout, dst| {
-            crate::hip::affine_f32(src, layout, dst, mul, add)?;
+        try_scalar(op, |dtype, src, layout, dst| {
+            match dtype {
+                KernelDType::F32 => crate::hip::affine_f32(src, layout, dst, mul, add)?,
+                KernelDType::BF16 => crate::hip::affine_bf16(src, layout, dst, mul, add)?,
+                _ => unreachable!(),
+            }
             Ok(true)
         })
     }
@@ -755,8 +837,12 @@ pub mod tensor {
             Ok(None)
         }
         #[cfg(hip_runtime)]
-        try_scalar(op, |src, layout, dst| {
-            crate::hip::powf_f32(src, layout, dst, value)?;
+        try_scalar(op, |dtype, src, layout, dst| {
+            match dtype {
+                KernelDType::F32 => crate::hip::powf_f32(src, layout, dst, value)?,
+                KernelDType::BF16 => crate::hip::powf_bf16(src, layout, dst, value)?,
+                _ => unreachable!(),
+            }
             Ok(true)
         })
     }
@@ -768,8 +854,12 @@ pub mod tensor {
             Ok(None)
         }
         #[cfg(hip_runtime)]
-        try_scalar(op, |src, layout, dst| {
-            crate::hip::elu_f32(src, layout, dst, alpha)?;
+        try_scalar(op, |dtype, src, layout, dst| {
+            match dtype {
+                KernelDType::F32 => crate::hip::elu_f32(src, layout, dst, alpha)?,
+                KernelDType::BF16 => crate::hip::elu_bf16(src, layout, dst, alpha)?,
+                _ => unreachable!(),
+            }
             Ok(true)
         })
     }
@@ -791,13 +881,13 @@ pub mod tensor {
             let Some(code) = reduce_opcode(op.name) else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32 {
+            if !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16) {
                 return Ok(None);
             }
             let output_dtype = if matches!(code, 4 | 5) {
                 KernelDType::U32
             } else {
-                KernelDType::F32
+                op.input.dtype()
             };
             if output.dtype() != output_dtype {
                 return Ok(None);
@@ -816,30 +906,68 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::reduce_f32(
-                code,
-                op.input.buffer(),
-                layout,
-                reduce_mask,
-                reduce_count,
-                &dst,
-                output.elem_count(),
-            )?;
+            match op.input.dtype() {
+                KernelDType::F32 => crate::hip::reduce_f32(
+                    code,
+                    op.input.buffer(),
+                    layout,
+                    reduce_mask,
+                    reduce_count,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                KernelDType::BF16 => crate::hip::reduce_bf16(
+                    code,
+                    op.input.buffer(),
+                    layout,
+                    reduce_mask,
+                    reduce_count,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
 
     pub fn try_to_dtype(op: &Op1) -> crate::Result<Option<Buffer>> {
-        let Some(_) = op.input_layout.as_ref() else {
+        let Some(layout) = op.input_layout.as_ref() else {
             return Ok(None);
         };
         let Some(output) = op.output else {
             return Ok(None);
         };
-        if op.input.dtype() != KernelDType::F32 || output.dtype() != KernelDType::F32 {
-            return Ok(None);
+        if op.input.dtype() == output.dtype() {
+            return try_clone(op);
         }
-        try_clone(op)
+        #[cfg(hip_runtime)]
+        {
+            let supported_cast = matches!(
+                (op.input.dtype(), output.dtype()),
+                (KernelDType::F32, KernelDType::BF16) | (KernelDType::BF16, KernelDType::F32)
+            );
+            if !supported_cast || output.elem_count() != layout.elem_count() {
+                return Ok(None);
+            }
+            check_layout(&op.input, layout)?;
+            let dst = op.input.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            match (op.input.dtype(), output.dtype()) {
+                (KernelDType::F32, KernelDType::BF16) => {
+                    crate::hip::cast_f32_to_bf16(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::BF16, KernelDType::F32) => {
+                    crate::hip::cast_bf16_to_f32(op.input.buffer(), layout, &dst)?
+                }
+                _ => unreachable!(),
+            }
+            return Ok(Some(dst));
+        }
+        #[allow(unreachable_code)]
+        Ok(None)
     }
 
     pub fn try_unary(op: &Op1) -> crate::Result<Option<Buffer>> {
@@ -974,9 +1102,9 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.first.dtype() != KernelDType::U8
-                || op.second.dtype() != KernelDType::F32
-                || op.third.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+                || op.second.dtype() != op.third.dtype()
+                || op.second.dtype() != output.dtype()
+                || !matches!(op.second.dtype(), KernelDType::F32 | KernelDType::BF16)
             {
                 return Ok(None);
             }
@@ -993,15 +1121,27 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::where_u8_f32(
-                op.first.buffer(),
-                cond_layout,
-                op.second.buffer(),
-                true_layout,
-                op.third.buffer(),
-                false_layout,
-                &dst,
-            )?;
+            match op.second.dtype() {
+                KernelDType::F32 => crate::hip::where_u8_f32(
+                    op.first.buffer(),
+                    cond_layout,
+                    op.second.buffer(),
+                    true_layout,
+                    op.third.buffer(),
+                    false_layout,
+                    &dst,
+                )?,
+                KernelDType::BF16 => crate::hip::where_u8_bf16(
+                    op.first.buffer(),
+                    cond_layout,
+                    op.second.buffer(),
+                    true_layout,
+                    op.third.buffer(),
+                    false_layout,
+                    &dst,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1020,7 +1160,7 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
+            if !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || output.dtype() != KernelDType::U32
                 || output.elem_count() != layout.elem_count()
                 || layout.dims().last().copied() != Some(last_dim)
@@ -1034,7 +1174,15 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::arg_sort_f32(op.input.buffer(), layout, &dst, asc, last_dim)?;
+            match op.input.dtype() {
+                KernelDType::F32 => {
+                    crate::hip::arg_sort_f32(op.input.buffer(), layout, &dst, asc, last_dim)?
+                }
+                KernelDType::BF16 => {
+                    crate::hip::arg_sort_bf16(op.input.buffer(), layout, &dst, asc, last_dim)?
+                }
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1056,9 +1204,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || src_layout.dims().len() != 3
                 || kernel_layout.dims().len() != 3
                 || src_layout.dims()[1] != kernel_layout.dims()[1]
@@ -1076,18 +1224,33 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::conv1d_f32(
-                op.lhs.buffer(),
-                src_layout,
-                op.rhs.buffer(),
-                kernel_layout,
-                &dst,
-                params.padding,
-                params.stride,
-                params.dilation,
-                params.l_out,
-                params.elem_count,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::conv1d_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
+                KernelDType::BF16 => crate::hip::conv1d_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1109,9 +1272,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || src_layout.dims().len() != 3
                 || kernel_layout.dims().len() != 3
                 || src_layout.dims()[1] != kernel_layout.dims()[0]
@@ -1129,18 +1292,33 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::conv_transpose1d_f32(
-                op.lhs.buffer(),
-                src_layout,
-                op.rhs.buffer(),
-                kernel_layout,
-                &dst,
-                params.padding,
-                params.stride,
-                params.dilation,
-                params.l_out,
-                params.elem_count,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::conv_transpose1d_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
+                KernelDType::BF16 => crate::hip::conv_transpose1d_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1162,9 +1340,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || src_layout.dims().len() != 4
                 || kernel_layout.dims().len() != 4
                 || src_layout.dims()[1] != kernel_layout.dims()[1]
@@ -1182,19 +1360,35 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::conv2d_f32(
-                op.lhs.buffer(),
-                src_layout,
-                op.rhs.buffer(),
-                kernel_layout,
-                &dst,
-                params.padding,
-                params.stride,
-                params.dilation,
-                params.out_h,
-                params.out_w,
-                params.elem_count,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::conv2d_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
+                KernelDType::BF16 => crate::hip::conv2d_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1216,9 +1410,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || src_layout.dims().len() != 4
                 || kernel_layout.dims().len() != 4
                 || src_layout.dims()[1] != kernel_layout.dims()[0]
@@ -1236,19 +1430,35 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::conv_transpose2d_f32(
-                op.lhs.buffer(),
-                src_layout,
-                op.rhs.buffer(),
-                kernel_layout,
-                &dst,
-                params.padding,
-                params.stride,
-                params.dilation,
-                params.out_h,
-                params.out_w,
-                params.elem_count,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::conv_transpose2d_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
+                KernelDType::BF16 => crate::hip::conv_transpose2d_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1272,8 +1482,8 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.input.dtype() != output.dtype()
+                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || layout.dims().len() != 4
                 || kernel.0 == 0
                 || kernel.1 == 0
@@ -1295,16 +1505,29 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::pool2d_f32(
-                if max_pool { 2 } else { 1 },
-                op.input.buffer(),
-                layout,
-                &dst,
-                kernel,
-                stride,
-                out_h,
-                out_w,
-            )?;
+            match op.input.dtype() {
+                KernelDType::F32 => crate::hip::pool2d_f32(
+                    if max_pool { 2 } else { 1 },
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    kernel,
+                    stride,
+                    out_h,
+                    out_w,
+                )?,
+                KernelDType::BF16 => crate::hip::pool2d_bf16(
+                    if max_pool { 2 } else { 1 },
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    kernel,
+                    stride,
+                    out_h,
+                    out_w,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1323,8 +1546,8 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.input.dtype() != output.dtype()
+                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || layout.dims().len() != 3
                 || out_size == 0
             {
@@ -1339,7 +1562,15 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::upsample_nearest1d_f32(op.input.buffer(), layout, &dst, out_size)?;
+            match op.input.dtype() {
+                KernelDType::F32 => {
+                    crate::hip::upsample_nearest1d_f32(op.input.buffer(), layout, &dst, out_size)?
+                }
+                KernelDType::BF16 => {
+                    crate::hip::upsample_nearest1d_bf16(op.input.buffer(), layout, &dst, out_size)?
+                }
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1362,8 +1593,8 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.input.dtype() != output.dtype()
+                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || layout.dims().len() != 4
                 || out_h == 0
                 || out_w == 0
@@ -1379,7 +1610,23 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::upsample_nearest2d_f32(op.input.buffer(), layout, &dst, out_h, out_w)?;
+            match op.input.dtype() {
+                KernelDType::F32 => crate::hip::upsample_nearest2d_f32(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                )?,
+                KernelDType::BF16 => crate::hip::upsample_nearest2d_bf16(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1406,8 +1653,8 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.input.dtype() != output.dtype()
+                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || layout.dims().len() != 4
                 || out_h == 0
                 || out_w == 0
@@ -1447,16 +1694,29 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::upsample_bilinear2d_f32(
-                op.input.buffer(),
-                layout,
-                &dst,
-                out_h,
-                out_w,
-                scale_h,
-                scale_w,
-                align_corners,
-            )?;
+            match op.input.dtype() {
+                KernelDType::F32 => crate::hip::upsample_bilinear2d_f32(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                    scale_h,
+                    scale_w,
+                    align_corners,
+                )?,
+                KernelDType::BF16 => crate::hip::upsample_bilinear2d_bf16(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                    scale_h,
+                    scale_w,
+                    align_corners,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1478,7 +1738,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32 || output.dtype() != KernelDType::F32 {
+            if op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+            {
                 return Ok(None);
             }
             if ids_layout.dims().len() != 1 || dim >= src_layout.dims().len() {
@@ -1495,8 +1757,8 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            match op.rhs.dtype() {
-                KernelDType::U32 => crate::hip::index_select_u32_f32(
+            match (op.lhs.dtype(), op.rhs.dtype()) {
+                (KernelDType::F32, KernelDType::U32) => crate::hip::index_select_u32_f32(
                     op.lhs.buffer(),
                     src_layout,
                     op.rhs.buffer(),
@@ -1507,7 +1769,29 @@ pub mod tensor {
                     &dst,
                     output.elem_count(),
                 )?,
-                KernelDType::I64 => crate::hip::index_select_i64_f32(
+                (KernelDType::F32, KernelDType::I64) => crate::hip::index_select_i64_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                (KernelDType::BF16, KernelDType::U32) => crate::hip::index_select_u32_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                (KernelDType::BF16, KernelDType::I64) => crate::hip::index_select_i64_bf16(
                     op.lhs.buffer(),
                     src_layout,
                     op.rhs.buffer(),
@@ -1541,9 +1825,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
+            if !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || op.rhs.dtype() != KernelDType::U32
-                || output.dtype() != KernelDType::F32
+                || output.dtype() != op.lhs.dtype()
                 || src_layout.dims().len() != ids_layout.dims().len()
                 || dim >= src_layout.dims().len()
                 || ids_layout.elem_count() != output.elem_count()
@@ -1556,14 +1840,25 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::gather_u32_f32(
-                op.lhs.buffer(),
-                src_layout,
-                op.rhs.buffer(),
-                ids_layout,
-                dim,
-                &dst,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::gather_u32_f32(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout,
+                    dim,
+                    &dst,
+                )?,
+                KernelDType::BF16 => crate::hip::gather_u32_bf16(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout,
+                    dim,
+                    &dst,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1583,9 +1878,9 @@ pub mod tensor {
         }
         #[cfg(hip_runtime)]
         {
-            if op.dst.dtype() != KernelDType::F32
+            if !matches!(op.dst.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || op.second.dtype() != KernelDType::U32
-                || op.third.dtype() != KernelDType::F32
+                || op.third.dtype() != op.dst.dtype()
                 || dst_layout.dims().len() != ids_layout.dims().len()
                 || ids_layout.dims().len() != src_layout.dims().len()
                 || dim >= dst_layout.dims().len()
@@ -1603,16 +1898,29 @@ pub mod tensor {
             check_layout(&op.dst, dst_layout)?;
             check_layout(&op.second, ids_layout)?;
             check_layout(&op.third, src_layout)?;
-            crate::hip::scatter_u32_f32(
-                add,
-                op.dst.buffer(),
-                dst_layout,
-                op.second.buffer(),
-                ids_layout,
-                op.third.buffer(),
-                src_layout,
-                dim,
-            )?;
+            match op.dst.dtype() {
+                KernelDType::F32 => crate::hip::scatter_u32_f32(
+                    add,
+                    op.dst.buffer(),
+                    dst_layout,
+                    op.second.buffer(),
+                    ids_layout,
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                )?,
+                KernelDType::BF16 => crate::hip::scatter_u32_bf16(
+                    add,
+                    op.dst.buffer(),
+                    dst_layout,
+                    op.second.buffer(),
+                    ids_layout,
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(true)
         }
     }
@@ -1634,10 +1942,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.first.dtype() != KernelDType::F32
+            if !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || op.second.dtype() != KernelDType::U32
-                || op.third.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+                || op.third.dtype() != op.first.dtype()
+                || output.dtype() != op.first.dtype()
                 || ids_layout.dims().len() != 1
                 || dim >= input_layout.dims().len()
                 || input_layout.dims().len() != src_layout.dims().len()
@@ -1663,18 +1971,33 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::index_add_u32_f32(
-                op.first.buffer(),
-                input_layout,
-                op.second.buffer(),
-                ids_layout.start_offset(),
-                ids_layout.stride()[0],
-                ids_layout.dims()[0],
-                op.third.buffer(),
-                src_layout,
-                dim,
-                &dst,
-            )?;
+            match op.first.dtype() {
+                KernelDType::F32 => crate::hip::index_add_u32_f32(
+                    op.first.buffer(),
+                    input_layout,
+                    op.second.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    ids_layout.dims()[0],
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                    &dst,
+                )?,
+                KernelDType::BF16 => crate::hip::index_add_u32_bf16(
+                    op.first.buffer(),
+                    input_layout,
+                    op.second.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    ids_layout.dims()[0],
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                    &dst,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1699,9 +2022,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
             {
                 return Ok(None);
             }
@@ -1729,20 +2052,37 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::matmul_f32(
-                op.lhs.buffer(),
-                op.rhs.buffer(),
-                &dst,
-                bmnk,
-                lhs_layout.start_offset(),
-                rhs_layout.start_offset(),
-                lhs_batch_stride,
-                rhs_batch_stride,
-                lhs_row_stride,
-                lhs_col_stride,
-                rhs_row_stride,
-                rhs_col_stride,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::matmul_f32(
+                    op.lhs.buffer(),
+                    op.rhs.buffer(),
+                    &dst,
+                    bmnk,
+                    lhs_layout.start_offset(),
+                    rhs_layout.start_offset(),
+                    lhs_batch_stride,
+                    rhs_batch_stride,
+                    lhs_row_stride,
+                    lhs_col_stride,
+                    rhs_row_stride,
+                    rhs_col_stride,
+                )?,
+                KernelDType::BF16 => crate::hip::matmul_bf16(
+                    op.lhs.buffer(),
+                    op.rhs.buffer(),
+                    &dst,
+                    bmnk,
+                    lhs_layout.start_offset(),
+                    rhs_layout.start_offset(),
+                    lhs_batch_stride,
+                    rhs_batch_stride,
+                    lhs_row_stride,
+                    lhs_col_stride,
+                    rhs_row_stride,
+                    rhs_col_stride,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1761,8 +2101,8 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.input.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.input.dtype() != output.dtype()
+                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || !is_contiguous(layout)
                 || layout.dims().is_empty()
             {
@@ -1774,13 +2114,23 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::softmax_last_dim_f32(
-                op.input.buffer(),
-                layout.start_offset(),
-                &dst,
-                rows,
-                cols,
-            )?;
+            match op.input.dtype() {
+                KernelDType::F32 => crate::hip::softmax_last_dim_f32(
+                    op.input.buffer(),
+                    layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                )?,
+                KernelDType::BF16 => crate::hip::softmax_last_dim_bf16(
+                    op.input.buffer(),
+                    layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1802,9 +2152,9 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.lhs.dtype() != KernelDType::F32
-                || op.rhs.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.lhs.dtype() != op.rhs.dtype()
+                || op.lhs.dtype() != output.dtype()
+                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || !is_contiguous(src_layout)
                 || !is_contiguous(alpha_layout)
                 || src_layout.dims().is_empty()
@@ -1820,16 +2170,29 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::rms_norm_f32(
-                op.lhs.buffer(),
-                src_layout.start_offset(),
-                op.rhs.buffer(),
-                alpha_layout.start_offset(),
-                &dst,
-                rows,
-                cols,
-                eps,
-            )?;
+            match op.lhs.dtype() {
+                KernelDType::F32 => crate::hip::rms_norm_f32(
+                    op.lhs.buffer(),
+                    src_layout.start_offset(),
+                    op.rhs.buffer(),
+                    alpha_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
+                KernelDType::BF16 => crate::hip::rms_norm_bf16(
+                    op.lhs.buffer(),
+                    src_layout.start_offset(),
+                    op.rhs.buffer(),
+                    alpha_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1851,10 +2214,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.first.dtype() != KernelDType::F32
-                || op.second.dtype() != KernelDType::F32
-                || op.third.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.first.dtype() != op.second.dtype()
+                || op.first.dtype() != op.third.dtype()
+                || op.first.dtype() != output.dtype()
+                || !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || !is_contiguous(src_layout)
                 || !is_contiguous(alpha_layout)
                 || !is_contiguous(beta_layout)
@@ -1871,18 +2234,33 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::layer_norm_f32(
-                op.first.buffer(),
-                src_layout.start_offset(),
-                op.second.buffer(),
-                alpha_layout.start_offset(),
-                op.third.buffer(),
-                beta_layout.start_offset(),
-                &dst,
-                rows,
-                cols,
-                eps,
-            )?;
+            match op.first.dtype() {
+                KernelDType::F32 => crate::hip::layer_norm_f32(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    alpha_layout.start_offset(),
+                    op.third.buffer(),
+                    beta_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
+                KernelDType::BF16 => crate::hip::layer_norm_bf16(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    alpha_layout.start_offset(),
+                    op.third.buffer(),
+                    beta_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -1905,10 +2283,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if op.first.dtype() != KernelDType::F32
-                || op.second.dtype() != KernelDType::F32
-                || op.third.dtype() != KernelDType::F32
-                || output.dtype() != KernelDType::F32
+            if op.first.dtype() != op.second.dtype()
+                || op.first.dtype() != op.third.dtype()
+                || op.first.dtype() != output.dtype()
+                || !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
                 || src_layout.dims().len() != 4
                 || !is_contiguous(src_layout)
                 || !is_contiguous(cos_layout)
@@ -1927,22 +2305,41 @@ pub mod tensor {
                 output.dtype().storage_size_in_bytes(output.elem_count()),
                 false,
             )?;
-            crate::hip::rope_f32(
-                op.first.buffer(),
-                src_layout.start_offset(),
-                op.second.buffer(),
-                cos_layout.start_offset(),
-                op.third.buffer(),
-                sin_layout.start_offset(),
-                &dst,
-                b,
-                h,
-                t,
-                d,
-                interleaved,
-                unbatched_rope,
-                thd,
-            )?;
+            match op.first.dtype() {
+                KernelDType::F32 => crate::hip::rope_f32(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    cos_layout.start_offset(),
+                    op.third.buffer(),
+                    sin_layout.start_offset(),
+                    &dst,
+                    b,
+                    h,
+                    t,
+                    d,
+                    interleaved,
+                    unbatched_rope,
+                    thd,
+                )?,
+                KernelDType::BF16 => crate::hip::rope_bf16(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    cos_layout.start_offset(),
+                    op.third.buffer(),
+                    sin_layout.start_offset(),
+                    &dst,
+                    b,
+                    h,
+                    t,
+                    d,
+                    interleaved,
+                    unbatched_rope,
+                    thd,
+                )?,
+                _ => unreachable!(),
+            }
             Ok(Some(dst))
         }
     }
@@ -2009,7 +2406,9 @@ pub mod tensor {
         let Some(code) = unary_opcode(op.name) else {
             return Ok(None);
         };
-        if op.input.dtype() != KernelDType::F32 || output.dtype() != KernelDType::F32 {
+        if op.input.dtype() != output.dtype()
+            || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+        {
             return Ok(None);
         }
         if layout.elem_count() != output.elem_count() {
@@ -2020,7 +2419,11 @@ pub mod tensor {
             output.dtype().storage_size_in_bytes(output.elem_count()),
             false,
         )?;
-        crate::hip::unary_f32(code, op.input.buffer(), layout, &dst)?;
+        match op.input.dtype() {
+            KernelDType::F32 => crate::hip::unary_f32(code, op.input.buffer(), layout, &dst)?,
+            KernelDType::BF16 => crate::hip::unary_bf16(code, op.input.buffer(), layout, &dst)?,
+            _ => unreachable!(),
+        }
         Ok(Some(dst))
     }
 
@@ -2038,9 +2441,9 @@ pub mod tensor {
         let Some(code) = binary_opcode(op.name) else {
             return Ok(None);
         };
-        if op.lhs.dtype() != KernelDType::F32
-            || op.rhs.dtype() != KernelDType::F32
-            || output.dtype() != KernelDType::F32
+        if op.lhs.dtype() != op.rhs.dtype()
+            || op.lhs.dtype() != output.dtype()
+            || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
         {
             return Ok(None);
         }
@@ -2055,14 +2458,25 @@ pub mod tensor {
             output.dtype().storage_size_in_bytes(output.elem_count()),
             false,
         )?;
-        crate::hip::binary_f32(
-            code,
-            op.lhs.buffer(),
-            lhs_layout,
-            op.rhs.buffer(),
-            rhs_layout,
-            &dst,
-        )?;
+        match op.lhs.dtype() {
+            KernelDType::F32 => crate::hip::binary_f32(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
+            KernelDType::BF16 => crate::hip::binary_bf16(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
+            _ => unreachable!(),
+        }
         Ok(Some(dst))
     }
 
@@ -2080,8 +2494,8 @@ pub mod tensor {
         let Some(code) = cmp_opcode(op.name) else {
             return Ok(None);
         };
-        if op.lhs.dtype() != KernelDType::F32
-            || op.rhs.dtype() != KernelDType::F32
+        if op.lhs.dtype() != op.rhs.dtype()
+            || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
             || output.dtype() != KernelDType::U8
         {
             return Ok(None);
@@ -2097,14 +2511,25 @@ pub mod tensor {
             .lhs
             .buffer()
             .allocate_on_same_allocator(output.elem_count(), false)?;
-        crate::hip::cmp_f32(
-            code,
-            op.lhs.buffer(),
-            lhs_layout,
-            op.rhs.buffer(),
-            rhs_layout,
-            &dst,
-        )?;
+        match op.lhs.dtype() {
+            KernelDType::F32 => crate::hip::cmp_f32(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
+            KernelDType::BF16 => crate::hip::cmp_bf16(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
+            _ => unreachable!(),
+        }
         Ok(Some(dst))
     }
 
@@ -2198,6 +2623,9 @@ pub mod tensor {
                 KernelScalar::U32(value) => {
                     crate::hip::const_set_u32(op.dst.buffer(), layout, value)?;
                 }
+                KernelScalar::BF16(value) => {
+                    crate::hip::const_set_bf16(op.dst.buffer(), layout, value)?;
+                }
             }
             Ok(())
         }
@@ -2226,6 +2654,7 @@ pub mod tensor {
                     }
                     op.dst.buffer().write_all(&u32s_to_bytes(&values))
                 }
+                KernelScalar::BF16(_) => Err(RocmError::NotImplemented("const_set bf16 host")),
             }
         }
     }
@@ -2410,7 +2839,7 @@ pub mod tensor {
     #[cfg(hip_runtime)]
     fn try_scalar<F>(op: &Op1, launch: F) -> crate::Result<Option<Buffer>>
     where
-        F: FnOnce(&Buffer, &LayoutArg, &Buffer) -> crate::Result<bool>,
+        F: FnOnce(KernelDType, &Buffer, &LayoutArg, &Buffer) -> crate::Result<bool>,
     {
         let Some(layout) = op.input_layout.as_ref() else {
             return Ok(None);
@@ -2418,8 +2847,8 @@ pub mod tensor {
         let Some(output) = op.output else {
             return Ok(None);
         };
-        if op.input.dtype() != KernelDType::F32
-            || output.dtype() != KernelDType::F32
+        if op.input.dtype() != output.dtype()
+            || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
             || output.elem_count() != layout.elem_count()
         {
             return Ok(None);
@@ -2429,7 +2858,7 @@ pub mod tensor {
             output.dtype().storage_size_in_bytes(output.elem_count()),
             false,
         )?;
-        if launch(op.input.buffer(), layout, &dst)? {
+        if launch(op.input.dtype(), op.input.buffer(), layout, &dst)? {
             Ok(Some(dst))
         } else {
             Ok(None)
