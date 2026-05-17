@@ -143,6 +143,14 @@ fn quantized_matmul(device: &Device) -> Result<()> {
                 [341876.0, 994283.0, 1655709.0, 2301518.0]
             ]
         ),
+        Device::Rocm(_) => assert_eq!(
+            to_vec2_round(&res, 0)?,
+            &[
+                [85120.0, 214562.0, 345455.0, 474748.0],
+                [213475.0, 604465.0, 1000686.0, 1388317.0],
+                [341876.0, 994283.0, 1655709.0, 2301518.0]
+            ]
+        ),
     }
     test_matmul(device, (1, 3, 4, 256), GgmlDType::Q4_0)?;
     Ok(())
@@ -207,6 +215,14 @@ fn quantized_matmul_neg(device: &Device) -> Result<()> {
                 [-196472.0, 63012.0, 324585.0, 587902.0]
             ]
         ),
+        Device::Rocm(_) => assert_eq!(
+            to_vec2_round(&res, 0)?,
+            &[
+                [243524.0, -19596.0, -285051.0, -549815.0],
+                [23777.0, 21651.0, 19398.0, 18367.0],
+                [-196472.0, 63012.0, 324585.0, 587902.0]
+            ]
+        ),
     }
     let lhs2 = Tensor::stack(&[&lhs, &lhs], 0)?;
     let res2 = matmul.forward(&lhs2)?;
@@ -257,9 +273,153 @@ fn qmm_batch(dev: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(quantized_matmul, qmm_cpu, qmm_cuda, qmm_metal);
-test_device!(quantized_matmul_neg, qmm_n_cpu, qmm_n_cuda, qmm_n_metal);
-test_device!(qmm_batch, qmm_b_cpu, qmm_b_cuda, qmm_b_metal);
+test_device!(quantized_matmul, qmm_cpu, qmm_cuda, qmm_metal, qmm_rocm);
+test_device!(
+    quantized_matmul_neg,
+    qmm_n_cpu,
+    qmm_n_cuda,
+    qmm_n_metal,
+    qmm_n_rocm
+);
+test_device!(qmm_batch, qmm_b_cpu, qmm_b_cuda, qmm_b_metal, qmm_b_rocm);
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_quantized_storage_stays_rocm() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let src = (0..32 * 4).map(|v| v as f32).collect::<Vec<_>>();
+    let src = Tensor::from_slice(&src, (32 * 4,), &device)?;
+    let quant = quantized::QTensor::quantize(&src, GgmlDType::Q4_0)?;
+    assert!(quant.device().is_rocm());
+    let dst = quant.dequantize(&device)?;
+    assert!(dst.device().is_rocm());
+    assert_eq!(dst.to_vec1::<f32>()?[0], -0.0);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_quantize_is_native() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let values = vec![1.25f32, -2.5, 3.75, 0.1, -0.25, 8.5];
+    let src = Tensor::from_slice(&values, (values.len(),), &device)?;
+    let quant = quantized::QTensor::quantize(&src, GgmlDType::BF16)?;
+    assert!(quant.device().is_rocm());
+    assert_eq!(quant.storage_size_in_bytes(), values.len() * 2);
+
+    let expected_bytes = values
+        .iter()
+        .flat_map(|v| half::bf16::from_f32(*v).to_bits().to_le_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(&*quant.data()?, expected_bytes.as_slice());
+
+    let deq = quant.dequantize(&device)?;
+    assert!(deq.device().is_rocm());
+    assert_eq!(deq.dtype(), DType::F32);
+    let expected = values
+        .iter()
+        .map(|v| half::bf16::from_f32(*v).to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(deq.to_vec1::<f32>()?, expected);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_f16_quantize_is_native() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let values = vec![1.25f32, -2.5, 3.75, 0.1, -0.25, 8.5];
+    let src = Tensor::from_slice(&values, (values.len(),), &device)?;
+    let quant = quantized::QTensor::quantize(&src, GgmlDType::F16)?;
+    assert!(quant.device().is_rocm());
+    assert_eq!(quant.storage_size_in_bytes(), values.len() * 2);
+
+    let expected_bytes = values
+        .iter()
+        .flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(&*quant.data()?, expected_bytes.as_slice());
+
+    let deq = quant.dequantize(&device)?;
+    assert!(deq.device().is_rocm());
+    assert_eq!(deq.dtype(), DType::F32);
+    let expected = values
+        .iter()
+        .map(|v| half::f16::from_f32(*v).to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(deq.to_vec1::<f32>()?, expected);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_bf16_tensor_quantize_stays_on_device() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let values = vec![1.25f32, -2.5, 3.75, 0.1];
+    let src = Tensor::from_slice(&values, (values.len(),), &device)?.to_dtype(DType::BF16)?;
+    assert!(src.device().is_rocm());
+    let quant = quantized::QTensor::quantize(&src, GgmlDType::BF16)?;
+    assert!(quant.device().is_rocm());
+
+    let deq = quant.dequantize(&device)?;
+    assert!(deq.device().is_rocm());
+    let expected = values
+        .iter()
+        .map(|v| half::bf16::from_f32(*v).to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(deq.to_vec1::<f32>()?, expected);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_f16_tensor_quantize_stays_on_device() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let values = vec![1.25f32, -2.5, 3.75, 0.1];
+    let src = Tensor::from_slice(&values, (values.len(),), &device)?.to_dtype(DType::F16)?;
+    assert!(src.device().is_rocm());
+    let quant = quantized::QTensor::quantize(&src, GgmlDType::F16)?;
+    assert!(quant.device().is_rocm());
+
+    let deq = quant.dequantize(&device)?;
+    assert!(deq.device().is_rocm());
+    let expected = values
+        .iter()
+        .map(|v| half::f16::from_f32(*v).to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(deq.to_vec1::<f32>()?, expected);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_f16_load_quantized_is_native() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let values = [1.25f32, -2.5, 3.75, 0.1, -0.25, 8.5];
+    let values_f16 = values
+        .iter()
+        .map(|v| half::f16::from_f32(*v))
+        .collect::<Vec<_>>();
+    let raw = unsafe {
+        std::slice::from_raw_parts(
+            values_f16.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(values_f16.as_slice()),
+        )
+    };
+    let storage =
+        quantized::QStorage::from_data(std::borrow::Cow::Borrowed(raw), &device, GgmlDType::F16)?;
+    let quant = quantized::QTensor::new(storage, (values.len(),))?;
+    assert!(quant.device().is_rocm());
+    assert_eq!(quant.storage_size_in_bytes(), values.len() * 2);
+    assert_eq!(&*quant.data()?, raw);
+
+    let deq = quant.dequantize(&device)?;
+    assert!(deq.device().is_rocm());
+    assert_eq!(deq.dtype(), DType::F32);
+    let expected = values_f16.iter().map(|v| v.to_f32()).collect::<Vec<_>>();
+    assert_eq!(deq.to_vec1::<f32>()?, expected);
+    Ok(())
+}
 
 fn quantize_q4_0(device: &Device) -> Result<()> {
     let src = (0..32 * 4).map(|v| v as f32).collect::<Vec<_>>();
@@ -954,61 +1114,71 @@ test_device!(
     quantize_q4_0,
     quantize_q4_0_cpu,
     quantize_q4_0_cuda,
-    quantize_q4_0_metal
+    quantize_q4_0_metal,
+    quantize_q4_0_rocm
 );
 test_device!(
     quantize_q4_1,
     quantize_q4_1_cpu,
     quantize_q4_1_cuda,
-    quantize_q4_1_metal
+    quantize_q4_1_metal,
+    quantize_q4_1_rocm
 );
 test_device!(
     quantize_q5_0,
     quantize_q5_0_cpu,
     quantize_q5_0_cuda,
-    quantize_q5_0_metal
+    quantize_q5_0_metal,
+    quantize_q5_0_rocm
 );
 test_device!(
     quantize_q5_1,
     quantize_q5_1_cpu,
     quantize_q5_1_cuda,
-    quantize_q5_1_metal
+    quantize_q5_1_metal,
+    quantize_q5_1_rocm
 );
 test_device!(
     quantize_q2k,
     quantize_q2k_cpu,
     quantize_q2k_cuda,
-    quantize_q2k_metal
+    quantize_q2k_metal,
+    quantize_q2k_rocm
 );
 test_device!(
     quantize_q3k,
     quantize_q3k_cpu,
     quantize_q3k_cuda,
-    quantize_q3k_metal
+    quantize_q3k_metal,
+    quantize_q3k_rocm
 );
 test_device!(
     quantize_q4k,
     quantize_q4k_cpu,
     quantize_q4k_cuda,
-    quantize_q4k_metal
+    quantize_q4k_metal,
+    quantize_q4k_rocm
 );
 test_device!(
     quantize_q5k,
     quantize_q5k_cpu,
     quantize_q5k_cuda,
-    quantize_q5k_metal
+    quantize_q5k_metal,
+    quantize_q5k_rocm
 );
 test_device!(
     quantize_q6k,
     quantize_q6k_cpu,
     quantize_q6k_cuda,
-    quantize_q6k_metal
+    quantize_q6k_metal,
+    quantize_q6k_rocm
 );
 test_device!(
     quantize_q8k,
     quantize_q8k_cpu,
     quantize_q8k_cuda,
-    quantize_q8k_metal
+    quantize_q8k_metal,
+    quantize_q8k_rocm
 );
 
 /// Very simple dot product implementation
@@ -1150,13 +1320,19 @@ fn get_random_tensors(
 macro_rules! quantized_matmul {
     // TODO: Switch to generating the two last arguments automatically once concat_idents is
     // stable. https://github.com/rust-lang/rust/issues/29599
-    ($fn_name: ident, $fn_name_cpu: ident, $fn_name_cuda: ident, $fn_name_metal: ident, $dtype: expr) => {
+    ($fn_name: ident, $fn_name_cpu: ident, $fn_name_cuda: ident, $fn_name_metal: ident, $fn_name_rocm: ident, $dtype: expr) => {
         fn $fn_name(device: &Device) -> Result<()> {
             test_matmul(device, (1, 3, 4, 256), $dtype)?;
             Ok(())
         }
 
-        test_device!($fn_name, $fn_name_cpu, $fn_name_cuda, $fn_name_metal);
+        test_device!(
+            $fn_name,
+            $fn_name_cpu,
+            $fn_name_cuda,
+            $fn_name_metal,
+            $fn_name_rocm
+        );
     };
 }
 
@@ -1165,6 +1341,7 @@ quantized_matmul!(
     quantized_matmul_q4_0_cpu,
     quantized_matmul_q4_0_cuda,
     quantized_matmul_q4_0_metal,
+    quantized_matmul_q4_0_rocm,
     GgmlDType::Q4_0
 );
 quantized_matmul!(
@@ -1172,6 +1349,7 @@ quantized_matmul!(
     quantized_matmul_q4_1_cpu,
     quantized_matmul_q4_1_cuda,
     quantized_matmul_q4_1_metal,
+    quantized_matmul_q4_1_rocm,
     GgmlDType::Q4_1
 );
 quantized_matmul!(
@@ -1179,6 +1357,7 @@ quantized_matmul!(
     quantized_matmul_q5_0_cpu,
     quantized_matmul_q5_0_cuda,
     quantized_matmul_q5_0_metal,
+    quantized_matmul_q5_0_rocm,
     GgmlDType::Q5_0
 );
 quantized_matmul!(
@@ -1186,6 +1365,7 @@ quantized_matmul!(
     quantized_matmul_q5_1_cpu,
     quantized_matmul_q5_1_cuda,
     quantized_matmul_q5_1_metal,
+    quantized_matmul_q5_1_rocm,
     GgmlDType::Q5_1
 );
 quantized_matmul!(
@@ -1193,6 +1373,7 @@ quantized_matmul!(
     quantized_matmul_q8_0_cpu,
     quantized_matmul_q8_0_cuda,
     quantized_matmul_q8_0_metal,
+    quantized_matmul_q8_0_rocm,
     GgmlDType::Q8_0
 );
 quantized_matmul!(
@@ -1200,6 +1381,7 @@ quantized_matmul!(
     quantized_matmul_q8_1_cpu,
     quantized_matmul_q8_1_cuda,
     quantized_matmul_q8_1_metal,
+    quantized_matmul_q8_1_rocm,
     GgmlDType::Q8_1
 );
 quantized_matmul!(
@@ -1207,6 +1389,7 @@ quantized_matmul!(
     quantized_matmul_q2k_cpu,
     quantized_matmul_q2k_cuda,
     quantized_matmul_q2k_metal,
+    quantized_matmul_q2k_rocm,
     GgmlDType::Q2K
 );
 quantized_matmul!(
@@ -1214,6 +1397,7 @@ quantized_matmul!(
     quantized_matmul_q3k_cpu,
     quantized_matmul_q3k_cuda,
     quantized_matmul_q3k_metal,
+    quantized_matmul_q3k_rocm,
     GgmlDType::Q3K
 );
 quantized_matmul!(
@@ -1221,6 +1405,7 @@ quantized_matmul!(
     quantized_matmul_q4k_cpu,
     quantized_matmul_q4k_cuda,
     quantized_matmul_q4k_metal,
+    quantized_matmul_q4k_rocm,
     GgmlDType::Q4K
 );
 quantized_matmul!(
@@ -1228,6 +1413,7 @@ quantized_matmul!(
     quantized_matmul_q5k_cpu,
     quantized_matmul_q5k_cuda,
     quantized_matmul_q5k_metal,
+    quantized_matmul_q5k_rocm,
     GgmlDType::Q5K
 );
 quantized_matmul!(
@@ -1235,6 +1421,7 @@ quantized_matmul!(
     quantized_matmul_q6k_cpu,
     quantized_matmul_q6k_cuda,
     quantized_matmul_q6k_metal,
+    quantized_matmul_q6k_rocm,
     GgmlDType::Q6K
 );
 // Not implemented on metal
@@ -1243,6 +1430,7 @@ quantized_matmul!(
     quantized_matmul_q8k_cpu,
     quantized_matmul_q8k_cuda,
     quantized_matmul_q8k_metal,
+    quantized_matmul_q8k_rocm,
     GgmlDType::Q8K
 );
 
