@@ -25,6 +25,10 @@ impl RocmDevice {
     fn ordinal(&self) -> usize {
         self.inner.ordinal()
     }
+
+    pub(crate) fn kernel_device(&self) -> &kernels::Device {
+        &self.inner
+    }
 }
 
 impl PartialEq for RocmDevice {
@@ -97,10 +101,64 @@ impl RocmStorage {
         Ok(())
     }
 
+    pub(crate) fn tensor_arg(&self) -> Result<kernels::TensorArg> {
+        kernels::TensorArg::new(&self.buffer, kernel_dtype(self.dtype)?, self.elem_count)
+            .map_err(Error::from)
+    }
+
+    fn op1(
+        &self,
+        name: &'static str,
+        output: Option<kernels::TensorOutput>,
+    ) -> Result<kernels::tensor::Op1> {
+        Ok(kernels::tensor::Op1 {
+            name,
+            input: self.tensor_arg()?,
+            output,
+        })
+    }
+
+    fn op2(
+        &self,
+        name: &'static str,
+        rhs: &Self,
+        output: Option<kernels::TensorOutput>,
+    ) -> Result<kernels::tensor::Op2> {
+        Ok(kernels::tensor::Op2 {
+            name,
+            lhs: self.tensor_arg()?,
+            rhs: rhs.tensor_arg()?,
+            output,
+        })
+    }
+
+    fn op3(
+        &self,
+        name: &'static str,
+        second: &Self,
+        third: &Self,
+        output: Option<kernels::TensorOutput>,
+    ) -> Result<kernels::tensor::Op3> {
+        Ok(kernels::tensor::Op3 {
+            name,
+            first: self.tensor_arg()?,
+            second: second.tensor_arg()?,
+            third: third.tensor_arg()?,
+            output,
+        })
+    }
+
     pub fn transfer_to_device(&self, dst: &RocmDevice) -> Result<Self> {
-        let bytes = kernels::tensor::transfer(|| self.to_host_bytes())?;
-        let buffer =
-            kernels::tensor::transfer(|| dst.inner.copy_from_host(&bytes).map_err(Error::from))?;
+        let op = kernels::tensor::TransferOp {
+            name: "transfer",
+            src: self.tensor_arg()?,
+            dst_device: dst.kernel_device(),
+            output: kernel_output(self.dtype, self.elem_count)?,
+        };
+        let buffer = kernels::tensor::call_transfer(op, || {
+            let bytes = self.to_host_bytes()?;
+            dst.inner.copy_from_host(&bytes).map_err(Error::from)
+        })?;
         Ok(Self {
             buffer,
             device: dst.clone(),
@@ -110,11 +168,28 @@ impl RocmStorage {
     }
 
     pub(crate) fn apply_op1(&self, l: &Layout, c: &dyn CustomOp1) -> Result<(Self, Shape)> {
-        let (storage, shape) = kernels::custom::apply_op1(|| {
-            let storage = self.to_cpu_storage_impl()?;
-            c.cpu_fwd(&storage, l)
-        })?;
-        let storage = Self::wrap_f32(storage, self.device.clone(), c.name())?;
+        let (storage, shape) = if c.name() == "argsort" {
+            let op = kernels::custom::Op1 {
+                name: c.name(),
+                input: self.tensor_arg()?,
+                output: Some(kernel_output_for_layout(l, DType::U32)?),
+            };
+            kernels::custom::call_arg_sort(op, || {
+                let storage = self.to_cpu_storage_impl()?;
+                c.cpu_fwd(&storage, l)
+            })?
+        } else {
+            let op = kernels::custom::Op1 {
+                name: c.name(),
+                input: self.tensor_arg()?,
+                output: None,
+            };
+            kernels::custom::call_apply_op1(op, || {
+                let storage = self.to_cpu_storage_impl()?;
+                c.cpu_fwd(&storage, l)
+            })?
+        };
+        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
         Ok((storage, shape))
     }
 
@@ -125,12 +200,18 @@ impl RocmStorage {
         l2: &Layout,
         c: &dyn CustomOp2,
     ) -> Result<(Self, Shape)> {
-        let (storage, shape) = kernels::custom::apply_op2(|| {
+        let op = kernels::custom::Op2 {
+            name: c.name(),
+            lhs: self.tensor_arg()?,
+            rhs: rhs.tensor_arg()?,
+            output: None,
+        };
+        let (storage, shape) = kernels::custom::call_apply_op2(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
             c.cpu_fwd(&lhs, l1, &rhs, l2)
         })?;
-        let storage = Self::wrap_f32(storage, self.device.clone(), c.name())?;
+        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
         Ok((storage, shape))
     }
 
@@ -143,22 +224,34 @@ impl RocmStorage {
         l3: &Layout,
         c: &dyn CustomOp3,
     ) -> Result<(Self, Shape)> {
-        let (storage, shape) = kernels::custom::apply_op3(|| {
+        let op = kernels::custom::Op3 {
+            name: c.name(),
+            lhs: self.tensor_arg()?,
+            rhs2: t2.tensor_arg()?,
+            rhs3: t3.tensor_arg()?,
+            output: None,
+        };
+        let (storage, shape) = kernels::custom::call_apply_op3(op, || {
             let t1 = self.to_cpu_storage_impl()?;
             let t2 = t2.to_cpu_storage_impl()?;
             let t3 = t3.to_cpu_storage_impl()?;
             c.cpu_fwd(&t1, l1, &t2, l2, &t3, l3)
         })?;
-        let storage = Self::wrap_f32(storage, self.device.clone(), c.name())?;
+        let storage = Self::wrap(storage, self.device.clone(), c.name())?;
         Ok((storage, shape))
     }
 
     pub(crate) fn inplace_op1(&mut self, l: &Layout, c: &dyn InplaceOp1) -> Result<()> {
-        kernels::custom::inplace_op1(|| {
+        let op = kernels::custom::InplaceOp1 {
+            name: c.name(),
+            dst: self.tensor_arg()?,
+        };
+        let storage = kernels::custom::call_inplace_op1(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             c.cpu_fwd(&mut storage, l)?;
-            self.set_cpu_storage_f32_owned(storage, c.name())
-        })
+            Ok::<CpuStorage, Error>(storage)
+        })?;
+        self.set_cpu_storage_f32_owned(storage, c.name())
     }
 
     pub(crate) fn inplace_op2(
@@ -168,12 +261,18 @@ impl RocmStorage {
         l2: &Layout,
         c: &dyn InplaceOp2,
     ) -> Result<()> {
-        kernels::custom::inplace_op2(|| {
+        let op = kernels::custom::InplaceOp2 {
+            name: c.name(),
+            dst: self.tensor_arg()?,
+            rhs: rhs.tensor_arg()?,
+        };
+        let storage = kernels::custom::call_inplace_op2(op, || {
             let mut lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
             c.cpu_fwd(&mut lhs, l1, &rhs, l2)?;
-            self.set_cpu_storage_f32_owned(lhs, c.name())
-        })
+            Ok::<CpuStorage, Error>(lhs)
+        })?;
+        self.set_cpu_storage_f32_owned(storage, c.name())
     }
 
     pub(crate) fn inplace_op3(
@@ -185,13 +284,20 @@ impl RocmStorage {
         l3: &Layout,
         c: &dyn InplaceOp3,
     ) -> Result<()> {
-        kernels::custom::inplace_op3(|| {
+        let op = kernels::custom::InplaceOp3 {
+            name: c.name(),
+            dst: self.tensor_arg()?,
+            rhs2: t2.tensor_arg()?,
+            rhs3: t3.tensor_arg()?,
+        };
+        let storage = kernels::custom::call_inplace_op3(op, || {
             let mut t1 = self.to_cpu_storage_impl()?;
             let t2 = t2.to_cpu_storage_impl()?;
             let t3 = t3.to_cpu_storage_impl()?;
             c.cpu_fwd(&mut t1, l1, &t2, l2, &t3, l3)?;
-            self.set_cpu_storage_f32_owned(t1, c.name())
-        })
+            Ok::<CpuStorage, Error>(t1)
+        })?;
+        self.set_cpu_storage_f32_owned(storage, c.name())
     }
 }
 
@@ -208,6 +314,34 @@ fn ensure_supported_storage_dtype(dtype: DType, op: &'static str) -> Result<()> 
         DType::F32 | DType::U8 | DType::U32 => Ok(()),
         dtype => Err(Error::UnsupportedDTypeForOp(dtype, op).bt()),
     }
+}
+
+fn kernel_dtype(dtype: DType) -> Result<kernels::KernelDType> {
+    let dtype = match dtype {
+        DType::U8 => kernels::KernelDType::U8,
+        DType::U32 => kernels::KernelDType::U32,
+        DType::I16 => kernels::KernelDType::I16,
+        DType::I32 => kernels::KernelDType::I32,
+        DType::I64 => kernels::KernelDType::I64,
+        DType::BF16 => kernels::KernelDType::BF16,
+        DType::F16 => kernels::KernelDType::F16,
+        DType::F32 => kernels::KernelDType::F32,
+        DType::F64 => kernels::KernelDType::F64,
+        DType::F8E4M3 => kernels::KernelDType::F8E4M3,
+        DType::F6E2M3 => kernels::KernelDType::F6E2M3,
+        DType::F6E3M2 => kernels::KernelDType::F6E3M2,
+        DType::F4 => kernels::KernelDType::F4,
+        DType::F8E8M0 => kernels::KernelDType::F8E8M0,
+    };
+    Ok(dtype)
+}
+
+fn kernel_output(dtype: DType, elem_count: usize) -> Result<kernels::TensorOutput> {
+    Ok(kernels::TensorOutput::new(kernel_dtype(dtype)?, elem_count))
+}
+
+fn kernel_output_for_layout(layout: &Layout, dtype: DType) -> Result<kernels::TensorOutput> {
+    kernel_output(dtype, layout.shape().elem_count())
 }
 
 fn slice_to_bytes<T>(data: &[T]) -> Vec<u8> {
@@ -249,6 +383,25 @@ fn cpu_storage_into_bytes(storage: CpuStorage) -> Result<(DType, usize, Vec<u8>)
     }
 }
 
+fn cpu_storage_meta(storage: &CpuStorage) -> (DType, usize) {
+    match storage {
+        CpuStorage::U8(data) => (DType::U8, data.len()),
+        CpuStorage::U32(data) => (DType::U32, data.len()),
+        CpuStorage::I16(data) => (DType::I16, data.len()),
+        CpuStorage::I32(data) => (DType::I32, data.len()),
+        CpuStorage::I64(data) => (DType::I64, data.len()),
+        CpuStorage::BF16(data) => (DType::BF16, data.len()),
+        CpuStorage::F16(data) => (DType::F16, data.len()),
+        CpuStorage::F32(data) => (DType::F32, data.len()),
+        CpuStorage::F64(data) => (DType::F64, data.len()),
+        CpuStorage::F8E4M3(data) => (DType::F8E4M3, data.len()),
+        CpuStorage::F6E2M3(data) => (DType::F6E2M3, data.len()),
+        CpuStorage::F6E3M2(data) => (DType::F6E3M2, data.len()),
+        CpuStorage::F4(data) => (DType::F4, data.len()),
+        CpuStorage::F8E8M0(data) => (DType::F8E8M0, data.len()),
+    }
+}
+
 fn cpu_storage_from_bytes(dtype: DType, elem_count: usize, bytes: Vec<u8>) -> Result<CpuStorage> {
     match dtype {
         DType::F32 => Ok(CpuStorage::F32(vec_from_bytes::<f32>(
@@ -274,7 +427,11 @@ impl BackendStorage for RocmStorage {
     type Device = RocmDevice;
 
     fn try_clone(&self, layout: &Layout) -> Result<Self> {
-        let storage = kernels::tensor::try_clone(|| {
+        let op = self.op1(
+            "try_clone",
+            Some(kernel_output_for_layout(layout, self.dtype)?),
+        )?;
+        let storage = kernels::tensor::call_try_clone(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.try_clone(layout)
         })?;
@@ -290,11 +447,19 @@ impl BackendStorage for RocmStorage {
     }
 
     fn to_cpu_storage(&self) -> Result<CpuStorage> {
-        kernels::tensor::transfer(|| self.to_cpu_storage_impl())
+        let op = self.op1(
+            "transfer_to_cpu",
+            Some(kernel_output(self.dtype, self.elem_count)?),
+        )?;
+        kernels::tensor::call_transfer_to_cpu(op, || self.to_cpu_storage_impl())
     }
 
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
-        let storage = kernels::tensor::affine(|| {
+        let op = self.op1(
+            "affine",
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        let storage = kernels::tensor::call_affine(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.affine(layout, mul, add)
         })?;
@@ -302,7 +467,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn powf(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let storage = kernels::tensor::powf(|| {
+        let op = self.op1("powf", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        let storage = kernels::tensor::call_powf(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.powf(layout, alpha)
         })?;
@@ -310,7 +476,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let storage = kernels::tensor::elu(|| {
+        let op = self.op1("elu", Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        let storage = kernels::tensor::call_elu(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.elu(layout, alpha)
         })?;
@@ -318,7 +485,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn reduce_op(&self, op: ReduceOp, layout: &Layout, dims: &[usize]) -> Result<Self> {
-        let storage = kernels::tensor::reduce(|| {
+        let kernel_op = self.op1(op.name(), None)?;
+        let storage = kernels::tensor::call_reduce(kernel_op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.reduce_op(op, layout, dims)
         })?;
@@ -326,7 +494,12 @@ impl BackendStorage for RocmStorage {
     }
 
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_l: &Layout, rhs_l: &Layout) -> Result<Self> {
-        let storage = kernels::tensor::cmp(|| {
+        let kernel_op = self.op2(
+            "cmp",
+            rhs,
+            Some(kernel_output_for_layout(lhs_l, DType::U8)?),
+        )?;
+        let storage = kernels::tensor::call_cmp(kernel_op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
             lhs.cmp(op, &rhs, lhs_l, rhs_l)
@@ -336,7 +509,8 @@ impl BackendStorage for RocmStorage {
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
         ensure_f32(dtype, "to_dtype")?;
-        let storage = kernels::tensor::to_dtype(|| {
+        let op = self.op1("to_dtype", Some(kernel_output_for_layout(layout, dtype)?))?;
+        let storage = kernels::tensor::call_to_dtype(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.to_dtype(layout, dtype)
         })?;
@@ -344,7 +518,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
-        let storage = kernels::tensor::unary(|| {
+        let op = self.op1(B::NAME, Some(kernel_output_for_layout(layout, DType::F32)?))?;
+        let storage = kernels::tensor::call_unary(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.unary_impl::<B>(layout)
         })?;
@@ -357,7 +532,12 @@ impl BackendStorage for RocmStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
-        let storage = kernels::tensor::binary(|| {
+        let op = self.op2(
+            B::NAME,
+            rhs,
+            Some(kernel_output_for_layout(lhs_l, DType::F32)?),
+        )?;
+        let storage = kernels::tensor::call_binary(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
             lhs.binary_impl::<B>(&rhs, lhs_l, rhs_l)
@@ -373,7 +553,13 @@ impl BackendStorage for RocmStorage {
         f: &Self,
         f_l: &Layout,
     ) -> Result<Self> {
-        let storage = kernels::tensor::where_cond(|| {
+        let op = self.op3(
+            "where",
+            t,
+            f,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        let storage = kernels::tensor::call_where_cond(op, || {
             let cond = self.to_cpu_storage_impl()?;
             let t = t.to_cpu_storage_impl()?;
             let f = f.to_cpu_storage_impl()?;
@@ -389,7 +575,8 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
-        let storage = kernels::tensor::conv1d(|| {
+        let op = self.op2("conv1d", kernel, None)?;
+        let storage = kernels::tensor::call_conv1d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
             lhs.conv1d(l, &kernel, kernel_l, params)
@@ -404,7 +591,8 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConvTranspose1D,
     ) -> Result<Self> {
-        let storage = kernels::tensor::conv_transpose1d(|| {
+        let op = self.op2("conv_transpose1d", kernel, None)?;
+        let storage = kernels::tensor::call_conv_transpose1d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
             lhs.conv_transpose1d(l, &kernel, kernel_l, params)
@@ -419,7 +607,8 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
-        let storage = kernels::tensor::conv2d(|| {
+        let op = self.op2("conv2d", kernel, None)?;
+        let storage = kernels::tensor::call_conv2d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
             lhs.conv2d(l, &kernel, kernel_l, params)
@@ -434,7 +623,8 @@ impl BackendStorage for RocmStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConvTranspose2D,
     ) -> Result<Self> {
-        let storage = kernels::tensor::conv_transpose2d(|| {
+        let op = self.op2("conv_transpose2d", kernel, None)?;
+        let storage = kernels::tensor::call_conv_transpose2d(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let kernel = kernel.to_cpu_storage_impl()?;
             lhs.conv_transpose2d(l, &kernel, kernel_l, params)
@@ -448,7 +638,8 @@ impl BackendStorage for RocmStorage {
         kernel: (usize, usize),
         stride: (usize, usize),
     ) -> Result<Self> {
-        let storage = kernels::tensor::avg_pool2d(|| {
+        let op = self.op1("avg_pool2d", None)?;
+        let storage = kernels::tensor::call_avg_pool2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.avg_pool2d(l, kernel, stride)
         })?;
@@ -461,7 +652,8 @@ impl BackendStorage for RocmStorage {
         kernel: (usize, usize),
         stride: (usize, usize),
     ) -> Result<Self> {
-        let storage = kernels::tensor::max_pool2d(|| {
+        let op = self.op1("max_pool2d", None)?;
+        let storage = kernels::tensor::call_max_pool2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.max_pool2d(l, kernel, stride)
         })?;
@@ -469,7 +661,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn upsample_nearest1d(&self, l: &Layout, size: usize) -> Result<Self> {
-        let storage = kernels::tensor::upsample_nearest1d(|| {
+        let op = self.op1("upsample_nearest1d", Some(kernel_output(DType::F32, size)?))?;
+        let storage = kernels::tensor::call_upsample_nearest1d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_nearest1d(l, size)
         })?;
@@ -477,7 +670,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn upsample_nearest2d(&self, l: &Layout, h: usize, w: usize) -> Result<Self> {
-        let storage = kernels::tensor::upsample_nearest2d(|| {
+        let op = self.op1("upsample_nearest2d", None)?;
+        let storage = kernels::tensor::call_upsample_nearest2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_nearest2d(l, h, w)
         })?;
@@ -493,7 +687,8 @@ impl BackendStorage for RocmStorage {
         scale_h: Option<f64>,
         scale_w: Option<f64>,
     ) -> Result<Self> {
-        let storage = kernels::tensor::upsample_bilinear2d(|| {
+        let op = self.op1("upsample_bilinear2d", None)?;
+        let storage = kernels::tensor::call_upsample_bilinear2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.upsample_bilinear2d(l, h, w, align_corners, scale_h, scale_w)
         })?;
@@ -501,7 +696,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn gather(&self, l: &Layout, ids: &Self, ids_l: &Layout, dim: usize) -> Result<Self> {
-        let storage = kernels::tensor::gather(|| {
+        let op = self.op2("gather", ids, None)?;
+        let storage = kernels::tensor::call_gather(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
             storage.gather(l, &ids, ids_l, dim)
@@ -518,7 +714,13 @@ impl BackendStorage for RocmStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<()> {
-        kernels::tensor::scatter_set(|| {
+        let op = kernels::tensor::InplaceOp3 {
+            name: "scatter_set",
+            dst: self.tensor_arg()?,
+            second: ids.tensor_arg()?,
+            third: src.tensor_arg()?,
+        };
+        kernels::tensor::call_scatter_set(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
             let src = src.to_cpu_storage_impl()?;
@@ -536,7 +738,13 @@ impl BackendStorage for RocmStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<()> {
-        kernels::tensor::scatter_add_set(|| {
+        let op = kernels::tensor::InplaceOp3 {
+            name: "scatter_add",
+            dst: self.tensor_arg()?,
+            second: ids.tensor_arg()?,
+            third: src.tensor_arg()?,
+        };
+        kernels::tensor::call_scatter_add_set(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
             let src = src.to_cpu_storage_impl()?;
@@ -546,7 +754,8 @@ impl BackendStorage for RocmStorage {
     }
 
     fn index_select(&self, ids: &Self, l: &Layout, ids_l: &Layout, dim: usize) -> Result<Self> {
-        let storage = kernels::tensor::index_select(|| {
+        let op = self.op2("index_select", ids, None)?;
+        let storage = kernels::tensor::call_index_select(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
             storage.index_select(&ids, l, ids_l, dim)
@@ -563,7 +772,13 @@ impl BackendStorage for RocmStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<Self> {
-        let storage = kernels::tensor::index_add(|| {
+        let op = self.op3(
+            "index_add",
+            ids,
+            src,
+            Some(kernel_output_for_layout(l, DType::F32)?),
+        )?;
+        let storage = kernels::tensor::call_index_add(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let ids = ids.to_cpu_storage_impl()?;
             let src = src.to_cpu_storage_impl()?;
@@ -579,7 +794,9 @@ impl BackendStorage for RocmStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
-        let storage = kernels::tensor::matmul(|| {
+        let (b, m, n, _) = bmnk;
+        let op = self.op2("matmul", rhs, Some(kernel_output(DType::F32, b * m * n)?))?;
+        let storage = kernels::tensor::call_matmul(op, || {
             let lhs = self.to_cpu_storage_impl()?;
             let rhs = rhs.to_cpu_storage_impl()?;
             lhs.matmul(&rhs, bmnk, lhs_l, rhs_l)
@@ -588,7 +805,12 @@ impl BackendStorage for RocmStorage {
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
-        kernels::tensor::copy_strided_src(|| {
+        let op = kernels::tensor::InplaceOp2 {
+            name: "copy_strided_src",
+            dst: dst.tensor_arg()?,
+            src: self.tensor_arg()?,
+        };
+        kernels::tensor::call_copy_strided_src(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let mut dst_storage = dst.to_cpu_storage_impl()?;
             storage.copy_strided_src(&mut dst_storage, dst_offset, src_l)?;
@@ -606,7 +828,12 @@ impl BackendStorage for RocmStorage {
         src_offset: usize,
         dst_offset: usize,
     ) -> Result<()> {
-        kernels::tensor::copy2d(|| {
+        let op = kernels::tensor::InplaceOp2 {
+            name: "copy2d",
+            dst: dst.tensor_arg()?,
+            src: self.tensor_arg()?,
+        };
+        kernels::tensor::call_copy2d(op, || {
             let storage = self.to_cpu_storage_impl()?;
             let mut dst_storage = dst.to_cpu_storage_impl()?;
             storage.copy2d(
@@ -624,7 +851,11 @@ impl BackendStorage for RocmStorage {
 
     fn const_set(&mut self, scalar: crate::scalar::Scalar, layout: &Layout) -> Result<()> {
         ensure_f32(scalar.dtype(), "const_set")?;
-        kernels::tensor::const_set(|| {
+        let op = kernels::tensor::InplaceOp1 {
+            name: "const_set",
+            dst: self.tensor_arg()?,
+        };
+        kernels::tensor::call_const_set(op, || {
             let mut storage = self.to_cpu_storage_impl()?;
             storage.const_set(scalar, layout)?;
             self.set_cpu_storage_f32_owned(storage, "const_set")
@@ -652,14 +883,25 @@ impl BackendDevice for RocmDevice {
 
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
         ensure_f32(dtype, "zeros")?;
-        let storage =
-            kernels::device::zeros(|| crate::cpu_backend::CpuDevice.zeros_impl(shape, dtype))?;
+        let op = kernels::device::AllocOp {
+            name: "zeros",
+            device: self.kernel_device(),
+            output: kernel_output(dtype, shape.elem_count())?,
+        };
+        let storage = kernels::device::call_zeros(op, || {
+            crate::cpu_backend::CpuDevice.zeros_impl(shape, dtype)
+        })?;
         RocmStorage::wrap(storage, self.clone(), "zeros")
     }
 
     unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
         ensure_supported_storage_dtype(dtype, "alloc_uninit")?;
-        let storage = kernels::device::alloc_uninit(|| {
+        let op = kernels::device::AllocOp {
+            name: "alloc_uninit",
+            device: self.kernel_device(),
+            output: kernel_output(dtype, shape.elem_count())?,
+        };
+        let storage = kernels::device::call_alloc_uninit(op, || {
             crate::cpu_backend::CpuDevice.alloc_uninit(shape, dtype)
         })?;
         RocmStorage::wrap(storage, self.clone(), "alloc_uninit")
@@ -667,27 +909,54 @@ impl BackendDevice for RocmDevice {
 
     fn storage_from_slice<T: crate::WithDType>(&self, data: &[T]) -> Result<Self::Storage> {
         ensure_supported_storage_dtype(T::DTYPE, "storage_from_slice")?;
-        let storage = kernels::device::storage_from_slice(|| {
+        let op = kernels::device::SliceLoadOp {
+            name: "storage_from_slice",
+            device: self.kernel_device(),
+            dtype: kernel_dtype(T::DTYPE)?,
+            elem_count: data.len(),
+        };
+        let storage = kernels::device::call_storage_from_slice(op, || {
             Ok::<CpuStorage, Error>(T::to_cpu_storage(data))
         })?;
         RocmStorage::wrap(storage, self.clone(), "storage_from_slice")
     }
 
     fn storage_from_cpu_storage(&self, storage: &CpuStorage) -> Result<Self::Storage> {
-        let storage =
-            kernels::device::storage_from_cpu_storage(|| Ok::<CpuStorage, Error>(storage.clone()))?;
+        let (dtype, elem_count) = cpu_storage_meta(storage);
+        let op = kernels::device::SliceLoadOp {
+            name: "storage_from_cpu_storage",
+            device: self.kernel_device(),
+            dtype: kernel_dtype(dtype)?,
+            elem_count,
+        };
+        let storage = kernels::device::call_storage_from_cpu_storage(op, || {
+            Ok::<CpuStorage, Error>(storage.clone())
+        })?;
         RocmStorage::wrap(storage, self.clone(), "storage_from_cpu_storage")
     }
 
     fn storage_from_cpu_storage_owned(&self, storage: CpuStorage) -> Result<Self::Storage> {
-        let storage =
-            kernels::device::storage_from_cpu_storage_owned(|| Ok::<CpuStorage, Error>(storage))?;
+        let (dtype, elem_count) = cpu_storage_meta(&storage);
+        let op = kernels::device::SliceLoadOp {
+            name: "storage_from_cpu_storage_owned",
+            device: self.kernel_device(),
+            dtype: kernel_dtype(dtype)?,
+            elem_count,
+        };
+        let storage = kernels::device::call_storage_from_cpu_storage_owned(op, || {
+            Ok::<CpuStorage, Error>(storage)
+        })?;
         RocmStorage::wrap(storage, self.clone(), "storage_from_cpu_storage_owned")
     }
 
     fn rand_uniform(&self, shape: &Shape, dtype: DType, lo: f64, up: f64) -> Result<Self::Storage> {
         ensure_f32(dtype, "rand_uniform")?;
-        let storage = kernels::device::rand_uniform(|| {
+        let op = kernels::device::AllocOp {
+            name: "rand_uniform",
+            device: self.kernel_device(),
+            output: kernel_output(dtype, shape.elem_count())?,
+        };
+        let storage = kernels::device::call_rand_uniform(op, || {
             crate::cpu_backend::CpuDevice.rand_uniform(shape, dtype, lo, up)
         })?;
         RocmStorage::wrap(storage, self.clone(), "rand_uniform")
@@ -701,21 +970,36 @@ impl BackendDevice for RocmDevice {
         std: f64,
     ) -> Result<Self::Storage> {
         ensure_f32(dtype, "rand_normal")?;
-        let storage = kernels::device::rand_normal(|| {
+        let op = kernels::device::AllocOp {
+            name: "rand_normal",
+            device: self.kernel_device(),
+            output: kernel_output(dtype, shape.elem_count())?,
+        };
+        let storage = kernels::device::call_rand_normal(op, || {
             crate::cpu_backend::CpuDevice.rand_normal(shape, dtype, mean, std)
         })?;
         RocmStorage::wrap(storage, self.clone(), "rand_normal")
     }
 
     fn set_seed(&self, seed: u64) -> Result<()> {
-        kernels::device::set_seed(|| {
+        let op = kernels::device::DeviceOp {
+            name: "set_seed",
+            device: self.kernel_device(),
+        };
+        kernels::device::call_set_seed(op, || {
             self.inner.set_seed(seed);
             Ok::<(), Error>(())
         })
     }
 
     fn get_current_seed(&self) -> Result<u64> {
-        kernels::device::get_current_seed(|| Ok::<u64, Error>(self.inner.get_current_seed()))
+        let op = kernels::device::DeviceOp {
+            name: "get_current_seed",
+            device: self.kernel_device(),
+        };
+        kernels::device::call_get_current_seed(op, || {
+            Ok::<u64, Error>(self.inner.get_current_seed())
+        })
     }
 
     fn synchronize(&self) -> Result<()> {
@@ -766,6 +1050,18 @@ mod tests {
 
         let arange = Tensor::arange(0u32, 3u32, &device)?.to_dtype(DType::F32)?;
         assert_eq!(arange.to_vec1::<f32>()?, vec![0., 1., 2.]);
+        Ok(())
+    }
+
+    #[test]
+    fn dummy_rocm_routes_argsort_through_kernel_wrapper() -> crate::Result<()> {
+        let device = Device::new_rocm(0)?;
+        let values = Tensor::from_slice(&[3f32, 1., 2., 4.], (2, 2), &device)?;
+        let indexes = values.arg_sort_last_dim(true)?;
+
+        assert!(indexes.device().is_rocm());
+        assert_eq!(indexes.dtype(), DType::U32);
+        assert_eq!(indexes.to_vec2::<u32>()?, vec![vec![1, 0], vec![0, 1]]);
         Ok(())
     }
 
