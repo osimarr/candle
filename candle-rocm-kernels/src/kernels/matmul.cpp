@@ -61,7 +61,7 @@ extern "C" int hip_matmul_f32(
     if (rc != 0 || elem_count == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "matmul_f32",
         elem_count,
         matmul_f32_kernel,

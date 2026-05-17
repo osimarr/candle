@@ -61,7 +61,7 @@ extern "C" int hip_random_uniform_f32(
     if (rc != 0 || elem_count == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "random_uniform_f32",
         elem_count,
         random_uniform_f32_kernel,
@@ -83,7 +83,7 @@ extern "C" int hip_random_normal_f32(
     if (rc != 0 || elem_count == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "random_normal_f32",
         elem_count,
         random_normal_f32_kernel,

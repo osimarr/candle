@@ -50,6 +50,8 @@ struct PendingFree {
 struct LifecycleState {
     active: HashMap<u64, AllocationMeta>,
     pending_frees: Vec<PendingFree>,
+    #[cfg(hip_runtime)]
+    free_blocks: HashMap<usize, Vec<crate::hip::DeviceMemory>>,
     free_policy: FreePolicy,
     total_allocations: u64,
     total_allocated_bytes: usize,
@@ -65,15 +67,27 @@ pub(crate) struct AllocationHandle {
     device_ordinal: usize,
     bytes: usize,
     allocator: Weak<AllocatorInner>,
+    released: bool,
+    #[cfg(hip_runtime)]
+    reused_memory: Option<crate::hip::DeviceMemory>,
 }
 
 impl AllocationHandle {
-    fn new(id: u64, device_ordinal: usize, bytes: usize, allocator: Weak<AllocatorInner>) -> Self {
+    fn new(
+        id: u64,
+        device_ordinal: usize,
+        bytes: usize,
+        allocator: Weak<AllocatorInner>,
+        #[cfg(hip_runtime)] reused_memory: Option<crate::hip::DeviceMemory>,
+    ) -> Self {
         Self {
             id,
             device_ordinal,
             bytes,
             allocator,
+            released: false,
+            #[cfg(hip_runtime)]
+            reused_memory,
         }
     }
 
@@ -98,13 +112,40 @@ impl AllocationHandle {
         let allocation = allocator.register_allocation(id, bytes)?;
         Buffer::new(allocation, zeroed)
     }
+
+    pub(crate) fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Some(allocator) = self.allocator.upgrade() {
+            #[cfg(hip_runtime)]
+            allocator.release(self.id, self.bytes, None);
+            #[cfg(not(hip_runtime))]
+            allocator.release(self.id, self.bytes);
+        }
+    }
+
+    #[cfg(hip_runtime)]
+    pub(crate) fn take_reused_memory(&mut self) -> Option<crate::hip::DeviceMemory> {
+        self.reused_memory.take()
+    }
+
+    #[cfg(hip_runtime)]
+    pub(crate) fn release_memory(&mut self, memory: crate::hip::DeviceMemory) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Some(allocator) = self.allocator.upgrade() {
+            allocator.release(self.id, self.bytes, Some(memory));
+        }
+    }
 }
 
 impl Drop for AllocationHandle {
     fn drop(&mut self) {
-        if let Some(allocator) = self.allocator.upgrade() {
-            allocator.release(self.id, self.bytes);
-        }
+        self.release();
     }
 }
 
@@ -182,9 +223,73 @@ impl AllocatorInner {
             self.device_ordinal,
             bytes,
             Arc::downgrade(self),
+            #[cfg(hip_runtime)]
+            Self::take_reusable_memory(&mut lifecycle, bytes),
         ))
     }
 
+    #[cfg(hip_runtime)]
+    fn take_reusable_memory(
+        lifecycle: &mut LifecycleState,
+        bytes: usize,
+    ) -> Option<crate::hip::DeviceMemory> {
+        let block = lifecycle
+            .free_blocks
+            .get_mut(&bytes)
+            .and_then(|blocks| blocks.pop())?;
+        if lifecycle
+            .free_blocks
+            .get(&bytes)
+            .is_some_and(|blocks| blocks.is_empty())
+        {
+            lifecycle.free_blocks.remove(&bytes);
+        }
+        if let Some(index) = lifecycle
+            .pending_frees
+            .iter()
+            .position(|pending| pending.bytes == bytes)
+        {
+            lifecycle.pending_frees.swap_remove(index);
+        }
+        Some(block)
+    }
+
+    #[cfg(hip_runtime)]
+    fn release(&self, id: u64, bytes: usize, memory: Option<crate::hip::DeviceMemory>) {
+        let mut drop_now = None;
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            return;
+        };
+        let bytes = lifecycle
+            .active
+            .remove(&id)
+            .map(|meta| meta.bytes)
+            .unwrap_or(bytes);
+        lifecycle.total_released_allocations += 1;
+        lifecycle.total_released_bytes += bytes;
+        match lifecycle.free_policy {
+            FreePolicy::SynchronizeOnDrop => {
+                if memory.is_some() {
+                    lifecycle.synchronized_frees += 1;
+                }
+                drop_now = memory;
+            }
+            FreePolicy::DeferUntilSynchronize => {
+                if let Some(memory) = memory {
+                    lifecycle.pending_frees.push(PendingFree { bytes });
+                    lifecycle
+                        .free_blocks
+                        .entry(memory.bytes())
+                        .or_default()
+                        .push(memory);
+                }
+            }
+        }
+        drop(lifecycle);
+        drop(drop_now);
+    }
+
+    #[cfg(not(hip_runtime))]
     fn release(&self, id: u64, bytes: usize) {
         let Ok(mut lifecycle) = self.lifecycle.lock() else {
             return;

@@ -8,8 +8,7 @@ namespace {
 __global__ void pool2d_f32_kernel(
     int op,
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
+    DeviceLayout layout,
     size_t start_offset,
     float* dst,
     size_t k_h,
@@ -28,12 +27,13 @@ __global__ void pool2d_f32_kernel(
     tmp /= out_w;
     const size_t out_h_idx = tmp % out_h;
     tmp /= out_h;
-    const size_t c_idx = tmp % dims[1];
-    tmp /= dims[1];
+    const size_t c_idx = tmp % layout.dims[1];
+    tmp /= layout.dims[1];
     const size_t b_idx = tmp;
 
-    const size_t base = start_offset + b_idx * strides[0] + c_idx * strides[1];
-    float value = src[base + out_h_idx * s_h * strides[2] + out_w_idx * s_w * strides[3]];
+    const size_t base = start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1];
+    float value = src[base + out_h_idx * s_h * layout.strides[2] +
+                      out_w_idx * s_w * layout.strides[3]];
     if (op == 1) {
         value = 0.0f;
     }
@@ -41,7 +41,8 @@ __global__ void pool2d_f32_kernel(
         const size_t src_h = out_h_idx * s_h + kh;
         for (size_t kw = 0; kw < k_w; ++kw) {
             const size_t src_w = out_w_idx * s_w + kw;
-            const float current = src[base + src_h * strides[2] + src_w * strides[3]];
+            const float current =
+                src[base + src_h * layout.strides[2] + src_w * layout.strides[3]];
             if (op == 1) {
                 value += current;
             } else {
@@ -57,8 +58,7 @@ __global__ void pool2d_f32_kernel(
 
 __global__ void upsample_nearest1d_f32_kernel(
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
+    DeviceLayout layout,
     size_t start_offset,
     float* dst,
     size_t out_size,
@@ -70,20 +70,19 @@ __global__ void upsample_nearest1d_f32_kernel(
     size_t tmp = index;
     const size_t out_idx = tmp % out_size;
     tmp /= out_size;
-    const size_t c_idx = tmp % dims[1];
-    tmp /= dims[1];
+    const size_t c_idx = tmp % layout.dims[1];
+    tmp /= layout.dims[1];
     const size_t b_idx = tmp;
-    const double scale = static_cast<double>(dims[2]) / static_cast<double>(out_size);
+    const double scale = static_cast<double>(layout.dims[2]) / static_cast<double>(out_size);
     const size_t src_idx =
-        min(dims[2] - 1, static_cast<size_t>(static_cast<double>(out_idx) * scale));
-    dst[index] = src[start_offset + b_idx * strides[0] + c_idx * strides[1] +
-                     src_idx * strides[2]];
+        min(layout.dims[2] - 1, static_cast<size_t>(static_cast<double>(out_idx) * scale));
+    dst[index] = src[start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1] +
+                     src_idx * layout.strides[2]];
 }
 
 __global__ void upsample_nearest2d_f32_kernel(
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
+    DeviceLayout layout,
     size_t start_offset,
     float* dst,
     size_t out_h,
@@ -98,23 +97,22 @@ __global__ void upsample_nearest2d_f32_kernel(
     tmp /= out_w;
     const size_t out_h_idx = tmp % out_h;
     tmp /= out_h;
-    const size_t c_idx = tmp % dims[1];
-    tmp /= dims[1];
+    const size_t c_idx = tmp % layout.dims[1];
+    tmp /= layout.dims[1];
     const size_t b_idx = tmp;
-    const double scale_h = static_cast<double>(dims[2]) / static_cast<double>(out_h);
-    const double scale_w = static_cast<double>(dims[3]) / static_cast<double>(out_w);
+    const double scale_h = static_cast<double>(layout.dims[2]) / static_cast<double>(out_h);
+    const double scale_w = static_cast<double>(layout.dims[3]) / static_cast<double>(out_w);
     const size_t src_h =
-        min(dims[2] - 1, static_cast<size_t>(static_cast<double>(out_h_idx) * scale_h));
+        min(layout.dims[2] - 1, static_cast<size_t>(static_cast<double>(out_h_idx) * scale_h));
     const size_t src_w =
-        min(dims[3] - 1, static_cast<size_t>(static_cast<double>(out_w_idx) * scale_w));
-    dst[index] = src[start_offset + b_idx * strides[0] + c_idx * strides[1] +
-                     src_h * strides[2] + src_w * strides[3]];
+        min(layout.dims[3] - 1, static_cast<size_t>(static_cast<double>(out_w_idx) * scale_w));
+    dst[index] = src[start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1] +
+                     src_h * layout.strides[2] + src_w * layout.strides[3]];
 }
 
 __global__ void upsample_bilinear2d_f32_kernel(
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
+    DeviceLayout layout,
     size_t start_offset,
     float* dst,
     size_t out_h,
@@ -132,8 +130,8 @@ __global__ void upsample_bilinear2d_f32_kernel(
     tmp /= out_w;
     const size_t out_h_idx = tmp % out_h;
     tmp /= out_h;
-    const size_t c_idx = tmp % dims[1];
-    tmp /= dims[1];
+    const size_t c_idx = tmp % layout.dims[1];
+    tmp /= layout.dims[1];
     const size_t b_idx = tmp;
 
     const double raw_h = align_corners ? scale_h * static_cast<double>(out_h_idx)
@@ -144,16 +142,20 @@ __global__ void upsample_bilinear2d_f32_kernel(
     const double src_w = fmax(raw_w, 0.0);
     const size_t h0 = static_cast<size_t>(floor(src_h));
     const size_t w0 = static_cast<size_t>(floor(src_w));
-    const size_t h1 = min(h0 + 1, dims[2] - 1);
-    const size_t w1 = min(w0 + 1, dims[3] - 1);
+    const size_t h1 = min(h0 + 1, layout.dims[2] - 1);
+    const size_t w1 = min(w0 + 1, layout.dims[3] - 1);
     const double weight_h = fmin(fmax(src_h - static_cast<double>(h0), 0.0), 1.0);
     const double weight_w = fmin(fmax(src_w - static_cast<double>(w0), 0.0), 1.0);
 
-    const size_t base = start_offset + b_idx * strides[0] + c_idx * strides[1];
-    const double v00 = static_cast<double>(src[base + h0 * strides[2] + w0 * strides[3]]);
-    const double v10 = static_cast<double>(src[base + h0 * strides[2] + w1 * strides[3]]);
-    const double v01 = static_cast<double>(src[base + h1 * strides[2] + w0 * strides[3]]);
-    const double v11 = static_cast<double>(src[base + h1 * strides[2] + w1 * strides[3]]);
+    const size_t base = start_offset + b_idx * layout.strides[0] + c_idx * layout.strides[1];
+    const double v00 =
+        static_cast<double>(src[base + h0 * layout.strides[2] + w0 * layout.strides[3]]);
+    const double v10 =
+        static_cast<double>(src[base + h0 * layout.strides[2] + w1 * layout.strides[3]]);
+    const double v01 =
+        static_cast<double>(src[base + h1 * layout.strides[2] + w0 * layout.strides[3]]);
+    const double v11 =
+        static_cast<double>(src[base + h1 * layout.strides[2] + w1 * layout.strides[3]]);
     const double v_top = v00 * (1.0 - weight_w) + v10 * weight_w;
     const double v_bottom = v01 * (1.0 - weight_w) + v11 * weight_w;
     dst[index] = static_cast<float>(v_top * (1.0 - weight_h) + v_bottom * weight_h);
@@ -203,8 +205,7 @@ extern "C" int hip_pool2d_f32(
         pool2d_f32_kernel,
         op,
         src,
-        layout.dims,
-        layout.strides,
+        layout,
         start_offset,
         dst,
         k_h,
@@ -243,8 +244,7 @@ extern "C" int hip_upsample_nearest1d_f32(
         elem_count,
         upsample_nearest1d_f32_kernel,
         src,
-        layout.dims,
-        layout.strides,
+        layout,
         start_offset,
         dst,
         out_size,
@@ -276,8 +276,7 @@ extern "C" int hip_upsample_nearest2d_f32(
         elem_count,
         upsample_nearest2d_f32_kernel,
         src,
-        layout.dims,
-        layout.strides,
+        layout,
         start_offset,
         dst,
         out_h,
@@ -313,8 +312,7 @@ extern "C" int hip_upsample_bilinear2d_f32(
         elem_count,
         upsample_bilinear2d_f32_kernel,
         src,
-        layout.dims,
-        layout.strides,
+        layout,
         start_offset,
         dst,
         out_h,

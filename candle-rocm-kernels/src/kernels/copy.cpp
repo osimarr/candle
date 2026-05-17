@@ -4,9 +4,7 @@ namespace {
 
 __global__ void copy_strided_src_kernel(
     const uint8_t* src,
-    const size_t* src_dims,
-    const size_t* src_strides,
-    size_t src_rank,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     uint8_t* dst,
     size_t dst_offset,
@@ -18,9 +16,7 @@ __global__ void copy_strided_src_kernel(
     }
     const size_t src_index = storage_index(
         logical_index,
-        src_dims,
-        src_strides,
-        src_rank,
+        src_layout,
         src_start_offset);
     const size_t dst_index = dst_offset + logical_index;
     for (size_t byte = 0; byte < elem_size; ++byte) {
@@ -79,9 +75,7 @@ extern "C" int hip_copy_strided_src(
         elem_count,
         copy_strided_src_kernel,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         src_start_offset,
         dst,
         dst_offset,

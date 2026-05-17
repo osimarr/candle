@@ -4,10 +4,10 @@ namespace {
 
 __global__ void conv1d_f32_kernel(
     const float* src,
-    const size_t* src_strides,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const float* kernel,
-    const size_t* kernel_strides,
+    DeviceLayout kernel_layout,
     size_t kernel_start_offset,
     float* dst,
     size_t b_size,
@@ -43,10 +43,11 @@ __global__ void conv1d_f32_kernel(
                 continue;
             }
             const float v =
-                src[src_start_offset + b * src_strides[0] + ci * src_strides[1] +
-                    in_x * src_strides[2]];
-            const float w = kernel[kernel_start_offset + co * kernel_strides[0] +
-                                   ci * kernel_strides[1] + k * kernel_strides[2]];
+                src[src_start_offset + b * src_layout.strides[0] +
+                    ci * src_layout.strides[1] + in_x * src_layout.strides[2]];
+            const float w = kernel[kernel_start_offset + co * kernel_layout.strides[0] +
+                                   ci * kernel_layout.strides[1] +
+                                   k * kernel_layout.strides[2]];
             sum += v * w;
         }
     }
@@ -55,10 +56,10 @@ __global__ void conv1d_f32_kernel(
 
 __global__ void conv_transpose1d_f32_kernel(
     const float* src,
-    const size_t* src_strides,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const float* kernel,
-    const size_t* kernel_strides,
+    DeviceLayout kernel_layout,
     size_t kernel_start_offset,
     float* dst,
     size_t b_size,
@@ -99,10 +100,11 @@ __global__ void conv_transpose1d_f32_kernel(
                 continue;
             }
             const float v =
-                src[src_start_offset + b * src_strides[0] + ci * src_strides[1] +
-                    in_x * src_strides[2]];
-            const float w = kernel[kernel_start_offset + ci * kernel_strides[0] +
-                                   co * kernel_strides[1] + k * kernel_strides[2]];
+                src[src_start_offset + b * src_layout.strides[0] +
+                    ci * src_layout.strides[1] + in_x * src_layout.strides[2]];
+            const float w = kernel[kernel_start_offset + ci * kernel_layout.strides[0] +
+                                   co * kernel_layout.strides[1] +
+                                   k * kernel_layout.strides[2]];
             sum += v * w;
         }
     }
@@ -111,10 +113,10 @@ __global__ void conv_transpose1d_f32_kernel(
 
 __global__ void conv2d_f32_kernel(
     const float* src,
-    const size_t* src_strides,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const float* kernel,
-    const size_t* kernel_strides,
+    DeviceLayout kernel_layout,
     size_t kernel_start_offset,
     float* dst,
     size_t b_size,
@@ -164,11 +166,13 @@ __global__ void conv2d_f32_kernel(
                     continue;
                 }
                 const float v =
-                    src[src_start_offset + b * src_strides[0] + ci * src_strides[1] +
-                        ih * src_strides[2] + iw * src_strides[3]];
-                const float w = kernel[kernel_start_offset + co * kernel_strides[0] +
-                                       ci * kernel_strides[1] + kh * kernel_strides[2] +
-                                       kw * kernel_strides[3]];
+                    src[src_start_offset + b * src_layout.strides[0] +
+                        ci * src_layout.strides[1] + ih * src_layout.strides[2] +
+                        iw * src_layout.strides[3]];
+                const float w = kernel[kernel_start_offset + co * kernel_layout.strides[0] +
+                                       ci * kernel_layout.strides[1] +
+                                       kh * kernel_layout.strides[2] +
+                                       kw * kernel_layout.strides[3]];
                 sum += v * w;
             }
         }
@@ -178,10 +182,10 @@ __global__ void conv2d_f32_kernel(
 
 __global__ void conv_transpose2d_f32_kernel(
     const float* src,
-    const size_t* src_strides,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const float* kernel,
-    const size_t* kernel_strides,
+    DeviceLayout kernel_layout,
     size_t kernel_start_offset,
     float* dst,
     size_t b_size,
@@ -241,11 +245,13 @@ __global__ void conv_transpose2d_f32_kernel(
                     continue;
                 }
                 const float v =
-                    src[src_start_offset + b * src_strides[0] + ci * src_strides[1] +
-                        ih * src_strides[2] + iw * src_strides[3]];
-                const float w = kernel[kernel_start_offset + ci * kernel_strides[0] +
-                                       co * kernel_strides[1] + kh * kernel_strides[2] +
-                                       kw * kernel_strides[3]];
+                    src[src_start_offset + b * src_layout.strides[0] +
+                        ci * src_layout.strides[1] + ih * src_layout.strides[2] +
+                        iw * src_layout.strides[3]];
+                const float w = kernel[kernel_start_offset + ci * kernel_layout.strides[0] +
+                                       co * kernel_layout.strides[1] +
+                                       kh * kernel_layout.strides[2] +
+                                       kw * kernel_layout.strides[3]];
                 sum += v * w;
             }
         }
@@ -299,10 +305,10 @@ extern "C" int hip_conv1d_f32(
         elem_count,
         conv1d_f32_kernel,
         src,
-        src_layout.strides,
+        src_layout,
         src_start_offset,
         kernel,
-        kernel_layout.strides,
+        kernel_layout,
         kernel_start_offset,
         dst,
         src_dims[0],
@@ -357,10 +363,10 @@ extern "C" int hip_conv_transpose1d_f32(
         elem_count,
         conv_transpose1d_f32_kernel,
         src,
-        src_layout.strides,
+        src_layout,
         src_start_offset,
         kernel,
-        kernel_layout.strides,
+        kernel_layout,
         kernel_start_offset,
         dst,
         src_dims[0],
@@ -416,10 +422,10 @@ extern "C" int hip_conv2d_f32(
         elem_count,
         conv2d_f32_kernel,
         src,
-        src_layout.strides,
+        src_layout,
         src_start_offset,
         kernel,
-        kernel_layout.strides,
+        kernel_layout,
         kernel_start_offset,
         dst,
         src_dims[0],
@@ -478,10 +484,10 @@ extern "C" int hip_conv_transpose2d_f32(
         elem_count,
         conv_transpose2d_f32_kernel,
         src,
-        src_layout.strides,
+        src_layout,
         src_start_offset,
         kernel,
-        kernel_layout.strides,
+        kernel_layout,
         kernel_start_offset,
         dst,
         src_dims[0],

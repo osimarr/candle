@@ -9,7 +9,7 @@ pub struct Buffer {
 }
 
 struct BufferInner {
-    storage: BufferStorage,
+    storage: Option<BufferStorage>,
     allocation: AllocationHandle,
 }
 
@@ -32,11 +32,14 @@ impl std::fmt::Debug for Buffer {
 }
 
 impl Buffer {
-    pub(crate) fn new(allocation: AllocationHandle, zeroed: bool) -> Result<Self> {
+    pub(crate) fn new(mut allocation: AllocationHandle, zeroed: bool) -> Result<Self> {
         let bytes = allocation.size_in_bytes();
         #[cfg(hip_runtime)]
         let storage = {
-            let memory = crate::hip::DeviceMemory::allocate(allocation.device_ordinal(), bytes)?;
+            let memory = match allocation.take_reused_memory() {
+                Some(memory) => memory,
+                None => crate::hip::DeviceMemory::allocate(allocation.device_ordinal(), bytes)?,
+            };
             if zeroed {
                 crate::hip::memset(&memory, 0)?;
             }
@@ -54,7 +57,7 @@ impl Buffer {
         };
         Ok(Self {
             inner: Arc::new(BufferInner {
-                storage,
+                storage: Some(storage),
                 allocation,
             }),
         })
@@ -106,7 +109,7 @@ impl Buffer {
 
     pub(crate) fn read_all(&self, dst: &mut [u8]) -> Result<()> {
         self.check_bounds(0, dst.len())?;
-        match &self.inner.storage {
+        match self.inner.storage.as_ref().expect("buffer storage dropped") {
             #[cfg(hip_runtime)]
             BufferStorage::Hip(memory) => crate::hip::copy_d2h(memory, dst),
             #[cfg(not(hip_runtime))]
@@ -122,7 +125,7 @@ impl Buffer {
 
     pub(crate) fn write_all(&self, src: &[u8]) -> Result<()> {
         self.check_bounds(0, src.len())?;
-        match &self.inner.storage {
+        match self.inner.storage.as_ref().expect("buffer storage dropped") {
             #[cfg(hip_runtime)]
             BufferStorage::Hip(memory) => crate::hip::copy_h2d(memory, src),
             #[cfg(not(hip_runtime))]
@@ -138,7 +141,7 @@ impl Buffer {
 
     #[cfg(hip_runtime)]
     pub(crate) fn device_ptr(&self) -> *mut std::os::raw::c_void {
-        match &self.inner.storage {
+        match self.inner.storage.as_ref().expect("buffer storage dropped") {
             BufferStorage::Hip(memory) => memory.ptr(),
         }
     }
@@ -172,6 +175,17 @@ impl Buffer {
                 requested: bytes,
             })
         }
+    }
+}
+
+impl Drop for BufferInner {
+    fn drop(&mut self) {
+        #[cfg(hip_runtime)]
+        if let Some(BufferStorage::Hip(memory)) = self.storage.take() {
+            self.allocation.release_memory(memory);
+            return;
+        }
+        self.allocation.release();
     }
 }
 

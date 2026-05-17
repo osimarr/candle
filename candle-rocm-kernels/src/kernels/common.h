@@ -29,46 +29,26 @@ inline int check_last_kernel_error(const char* op) {
     return set_error(op, hipDeviceSynchronize());
 }
 
-inline void ignore_error(hipError_t error) {
-    (void)error;
+inline int check_last_launch_error(const char* op) {
+    return set_error(op, hipGetLastError());
 }
 
 struct DeviceLayout {
-    size_t* dims = nullptr;
-    size_t* strides = nullptr;
+    static constexpr size_t MAX_RANK = 32;
+    size_t dims[MAX_RANK] = {};
+    size_t strides[MAX_RANK] = {};
     size_t rank = 0;
 
     int init(const size_t* host_dims, const size_t* host_strides, size_t layout_rank) {
+        if (layout_rank > MAX_RANK) {
+            return set_error("layout rank", hipErrorInvalidValue);
+        }
         rank = layout_rank;
-        if (rank == 0) {
-            return 0;
-        }
-        hipError_t error = hipMalloc(&dims, rank * sizeof(size_t));
-        if (error != hipSuccess) {
-            return set_error("hipMalloc layout dims", error);
-        }
-        error = hipMalloc(&strides, rank * sizeof(size_t));
-        if (error != hipSuccess) {
-            return set_error("hipMalloc layout strides", error);
-        }
-        error = hipMemcpy(dims, host_dims, rank * sizeof(size_t), hipMemcpyHostToDevice);
-        if (error != hipSuccess) {
-            return set_error("hipMemcpy layout dims", error);
-        }
-        error = hipMemcpy(strides, host_strides, rank * sizeof(size_t), hipMemcpyHostToDevice);
-        if (error != hipSuccess) {
-            return set_error("hipMemcpy layout strides", error);
+        for (size_t i = 0; i < rank; ++i) {
+            dims[i] = host_dims[i];
+            strides[i] = host_strides[i];
         }
         return 0;
-    }
-
-    ~DeviceLayout() {
-        if (dims != nullptr) {
-            ignore_error(hipFree(dims));
-        }
-        if (strides != nullptr) {
-            ignore_error(hipFree(strides));
-        }
     }
 };
 
@@ -92,6 +72,13 @@ __device__ inline size_t storage_index(
     return storage;
 }
 
+__device__ inline size_t storage_index(
+    size_t logical_index,
+    const DeviceLayout& layout,
+    size_t start_offset) {
+    return storage_index(logical_index, layout.dims, layout.strides, layout.rank, start_offset);
+}
+
 inline dim3 grid_for(size_t elem_count) {
     const unsigned int threads = 256;
     const unsigned int blocks =
@@ -103,7 +90,14 @@ template <typename Kernel, typename... Args>
 int launch_1d(const char* op, size_t elem_count, Kernel kernel, Args... args) {
     const dim3 block(256);
     hipLaunchKernelGGL(kernel, grid_for(elem_count), block, 0, 0, args...);
-    return check_last_kernel_error(op);
+    return check_last_launch_error(op);
+}
+
+template <typename Kernel, typename... Args>
+int launch_1d_async(const char* op, size_t elem_count, Kernel kernel, Args... args) {
+    const dim3 block(256);
+    hipLaunchKernelGGL(kernel, grid_for(elem_count), block, 0, 0, args...);
+    return check_last_launch_error(op);
 }
 
 inline int select_device(int ordinal) {

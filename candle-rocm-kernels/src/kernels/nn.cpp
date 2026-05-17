@@ -158,7 +158,7 @@ extern "C" int hip_softmax_last_dim_f32(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "softmax_last_dim_f32",
         rows,
         softmax_last_dim_f32_kernel,
@@ -183,7 +183,7 @@ extern "C" int hip_rms_norm_f32(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "rms_norm_f32",
         rows,
         rms_norm_f32_kernel,
@@ -213,7 +213,7 @@ extern "C" int hip_layer_norm_f32(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "layer_norm_f32",
         rows,
         layer_norm_f32_kernel,
@@ -250,7 +250,7 @@ extern "C" int hip_rope_f32(
     if (rc != 0 || pair_count == 0) {
         return rc;
     }
-    return launch_1d(
+    return launch_1d_async(
         "rope_f32",
         pair_count,
         rope_f32_kernel,

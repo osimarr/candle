@@ -26,14 +26,10 @@ __device__ float binary_value(int op, float lhs, float rhs) {
 __global__ void binary_f32_kernel(
     int op,
     const float* lhs,
-    const size_t* lhs_dims,
-    const size_t* lhs_strides,
-    size_t lhs_rank,
+    DeviceLayout lhs_layout,
     size_t lhs_start_offset,
     const float* rhs,
-    const size_t* rhs_dims,
-    const size_t* rhs_strides,
-    size_t rhs_rank,
+    DeviceLayout rhs_layout,
     size_t rhs_start_offset,
     float* dst,
     size_t elem_count) {
@@ -43,15 +39,11 @@ __global__ void binary_f32_kernel(
     }
     const size_t lhs_index = storage_index(
         logical_index,
-        lhs_dims,
-        lhs_strides,
-        lhs_rank,
+        lhs_layout,
         lhs_start_offset);
     const size_t rhs_index = storage_index(
         logical_index,
-        rhs_dims,
-        rhs_strides,
-        rhs_rank,
+        rhs_layout,
         rhs_start_offset);
     dst[logical_index] = binary_value(op, lhs[lhs_index], rhs[rhs_index]);
 }
@@ -93,14 +85,10 @@ extern "C" int hip_binary_f32(
         binary_f32_kernel,
         op,
         lhs,
-        lhs_layout.dims,
-        lhs_layout.strides,
-        lhs_layout.rank,
+        lhs_layout,
         lhs_start_offset,
         rhs,
-        rhs_layout.dims,
-        rhs_layout.strides,
-        rhs_layout.rank,
+        rhs_layout,
         rhs_start_offset,
         dst,
         elem_count);

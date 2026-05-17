@@ -154,13 +154,14 @@ impl LayoutArg {
     }
 
     fn max_storage_index(&self) -> Option<usize> {
-        let elem_count = self.elem_count();
-        (elem_count > 0).then(|| {
-            (0..elem_count)
-                .map(|index| self.storage_index(index))
-                .max()
-                .unwrap_or(self.start_offset)
-        })
+        if self.dims.contains(&0) {
+            return None;
+        }
+        let mut max_index = self.start_offset;
+        for (&dim, &stride) in self.dims.iter().zip(self.stride.iter()) {
+            max_index = max_index.checked_add((dim - 1).checked_mul(stride)?)?;
+        }
+        Some(max_index)
     }
 }
 
@@ -2398,7 +2399,7 @@ pub mod tensor {
             if max_index >= arg.elem_count() {
                 return Err(RocmError::BufferOutOfBounds {
                     buffer_bytes: arg.buffer().size_in_bytes(),
-                    offset: max_index * arg.dtype().storage_size_in_bytes(1),
+                    offset: max_index.saturating_mul(arg.dtype().storage_size_in_bytes(1)),
                     requested: arg.dtype().storage_size_in_bytes(1),
                 });
             }

@@ -56,9 +56,7 @@ __device__ float unary_value(int op, float value) {
 __global__ void unary_f32_kernel(
     int op,
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
-    size_t rank,
+    DeviceLayout layout,
     size_t start_offset,
     float* dst,
     size_t elem_count) {
@@ -66,8 +64,7 @@ __global__ void unary_f32_kernel(
     if (logical_index >= elem_count) {
         return;
     }
-    const size_t src_index =
-        storage_index(logical_index, dims, strides, rank, start_offset);
+    const size_t src_index = storage_index(logical_index, layout, start_offset);
     dst[logical_index] = unary_value(op, src[src_index]);
 }
 
@@ -98,9 +95,7 @@ extern "C" int hip_unary_f32(
         unary_f32_kernel,
         op,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         start_offset,
         dst,
         elem_count);

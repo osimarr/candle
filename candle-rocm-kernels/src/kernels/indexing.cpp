@@ -21,9 +21,7 @@ __device__ bool is_missing_index<int64_t>(int64_t value) {
 template <typename I>
 __global__ void index_select_f32_kernel(
     const float* src,
-    const size_t* src_dims,
-    const size_t* src_strides,
-    size_t rank,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const I* ids,
     size_t ids_start_offset,
@@ -40,15 +38,15 @@ __global__ void index_select_f32_kernel(
     size_t tmp = logical_index;
     size_t src_index = src_start_offset;
     size_t selected_id_pos = 0;
-    for (size_t rev = 0; rev < rank; ++rev) {
-        const size_t axis = rank - 1 - rev;
-        const size_t out_dim = axis == dim ? n_ids : src_dims[axis];
+    for (size_t rev = 0; rev < src_layout.rank; ++rev) {
+        const size_t axis = src_layout.rank - 1 - rev;
+        const size_t out_dim = axis == dim ? n_ids : src_layout.dims[axis];
         const size_t coord = tmp % out_dim;
         tmp /= out_dim;
         if (axis == dim) {
             selected_id_pos = coord;
         } else {
-            src_index += coord * src_strides[axis];
+            src_index += coord * src_layout.strides[axis];
         }
     }
 
@@ -58,20 +56,16 @@ __global__ void index_select_f32_kernel(
         return;
     }
     const size_t selected = static_cast<size_t>(raw_index);
-    dst[logical_index] = src[src_index + selected * src_strides[dim]];
+    dst[logical_index] = src[src_index + selected * src_layout.strides[dim]];
 }
 
 template <typename I>
 __global__ void gather_f32_kernel(
     const float* src,
-    const size_t* src_dims,
-    const size_t* src_strides,
-    size_t src_rank,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     const I* ids,
-    const size_t* ids_dims,
-    const size_t* ids_strides,
-    size_t ids_rank,
+    DeviceLayout ids_layout,
     size_t ids_start_offset,
     size_t dim,
     float* dst,
@@ -81,8 +75,7 @@ __global__ void gather_f32_kernel(
         return;
     }
 
-    const size_t ids_index =
-        storage_index(logical_index, ids_dims, ids_strides, ids_rank, ids_start_offset);
+    const size_t ids_index = storage_index(logical_index, ids_layout, ids_start_offset);
     const I raw_index = ids[ids_index];
     if (is_missing_index<I>(raw_index)) {
         dst[logical_index] = 0.0f;
@@ -91,11 +84,12 @@ __global__ void gather_f32_kernel(
 
     size_t tmp = logical_index;
     size_t src_index = src_start_offset;
-    for (size_t rev = 0; rev < src_rank; ++rev) {
-        const size_t axis = src_rank - 1 - rev;
-        const size_t coord = tmp % ids_dims[axis];
-        tmp /= ids_dims[axis];
-        src_index += (axis == dim ? static_cast<size_t>(raw_index) : coord) * src_strides[axis];
+    for (size_t rev = 0; rev < src_layout.rank; ++rev) {
+        const size_t axis = src_layout.rank - 1 - rev;
+        const size_t coord = tmp % ids_layout.dims[axis];
+        tmp /= ids_layout.dims[axis];
+        src_index +=
+            (axis == dim ? static_cast<size_t>(raw_index) : coord) * src_layout.strides[axis];
     }
     dst[logical_index] = src[src_index];
 }
@@ -104,19 +98,13 @@ template <typename I>
 __global__ void scatter_f32_kernel(
     int add,
     float* dst,
-    const size_t* dst_dims,
-    const size_t* dst_strides,
-    size_t dst_rank,
+    DeviceLayout dst_layout,
     size_t dst_start_offset,
     const I* ids,
-    const size_t* ids_dims,
-    const size_t* ids_strides,
-    size_t ids_rank,
+    DeviceLayout ids_layout,
     size_t ids_start_offset,
     const float* src,
-    const size_t* src_dims,
-    const size_t* src_strides,
-    size_t src_rank,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     size_t dim,
     size_t src_elem_count,
@@ -127,9 +115,7 @@ __global__ void scatter_f32_kernel(
     }
     const size_t dst_storage_index = storage_index(
         dst_logical_index,
-        dst_dims,
-        dst_strides,
-        dst_rank,
+        dst_layout,
         dst_start_offset);
     float value = dst[dst_storage_index];
 
@@ -137,9 +123,7 @@ __global__ void scatter_f32_kernel(
          ++src_logical_index) {
         const size_t ids_index = storage_index(
             src_logical_index,
-            ids_dims,
-            ids_strides,
-            ids_rank,
+            ids_layout,
             ids_start_offset);
         const I raw_index = ids[ids_index];
         if (is_missing_index<I>(raw_index)) {
@@ -148,12 +132,12 @@ __global__ void scatter_f32_kernel(
         size_t src_tmp = src_logical_index;
         size_t dst_tmp = dst_logical_index;
         bool matches = true;
-        for (size_t rev = 0; rev < dst_rank; ++rev) {
-            const size_t axis = dst_rank - 1 - rev;
-            const size_t src_coord = src_tmp % src_dims[axis];
-            src_tmp /= src_dims[axis];
-            const size_t dst_coord = dst_tmp % dst_dims[axis];
-            dst_tmp /= dst_dims[axis];
+        for (size_t rev = 0; rev < dst_layout.rank; ++rev) {
+            const size_t axis = dst_layout.rank - 1 - rev;
+            const size_t src_coord = src_tmp % src_layout.dims[axis];
+            src_tmp /= src_layout.dims[axis];
+            const size_t dst_coord = dst_tmp % dst_layout.dims[axis];
+            dst_tmp /= dst_layout.dims[axis];
             if (axis == dim) {
                 if (static_cast<size_t>(raw_index) != dst_coord) {
                     matches = false;
@@ -167,9 +151,7 @@ __global__ void scatter_f32_kernel(
         if (matches) {
             const float src_value = src[storage_index(
                 src_logical_index,
-                src_dims,
-                src_strides,
-                src_rank,
+                src_layout,
                 src_start_offset)];
             if (add) {
                 value += src_value;
@@ -184,18 +166,14 @@ __global__ void scatter_f32_kernel(
 template <typename I>
 __global__ void index_add_f32_kernel(
     const float* input,
-    const size_t* input_dims,
-    const size_t* input_strides,
-    size_t input_rank,
+    DeviceLayout input_layout,
     size_t input_start_offset,
     const I* ids,
     size_t ids_start_offset,
     size_t ids_stride,
     size_t ids_len,
     const float* src,
-    const size_t* src_dims,
-    const size_t* src_strides,
-    size_t src_rank,
+    DeviceLayout src_layout,
     size_t src_start_offset,
     size_t dim,
     float* dst,
@@ -206,16 +184,14 @@ __global__ void index_add_f32_kernel(
     }
     float value = input[storage_index(
         logical_index,
-        input_dims,
-        input_strides,
-        input_rank,
+        input_layout,
         input_start_offset)];
 
     size_t dst_dim_coord = logical_index;
-    for (size_t rev = 0; rev < input_rank; ++rev) {
-        const size_t axis = input_rank - 1 - rev;
-        const size_t coord = dst_dim_coord % input_dims[axis];
-        dst_dim_coord /= input_dims[axis];
+    for (size_t rev = 0; rev < input_layout.rank; ++rev) {
+        const size_t axis = input_layout.rank - 1 - rev;
+        const size_t coord = dst_dim_coord % input_layout.dims[axis];
+        dst_dim_coord /= input_layout.dims[axis];
         if (axis == dim) {
             dst_dim_coord = coord;
             break;
@@ -229,11 +205,11 @@ __global__ void index_add_f32_kernel(
         }
         size_t tmp = logical_index;
         size_t src_index = src_start_offset;
-        for (size_t rev = 0; rev < input_rank; ++rev) {
-            const size_t axis = input_rank - 1 - rev;
-            const size_t coord = tmp % input_dims[axis];
-            tmp /= input_dims[axis];
-            src_index += (axis == dim ? id_pos : coord) * src_strides[axis];
+        for (size_t rev = 0; rev < input_layout.rank; ++rev) {
+            const size_t axis = input_layout.rank - 1 - rev;
+            const size_t coord = tmp % input_layout.dims[axis];
+            tmp /= input_layout.dims[axis];
+            src_index += (axis == dim ? id_pos : coord) * src_layout.strides[axis];
         }
         value += src[src_index];
     }
@@ -270,9 +246,7 @@ int index_select_f32(
         elem_count,
         index_select_f32_kernel<I>,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         src_start_offset,
         ids,
         ids_start_offset,
@@ -319,14 +293,10 @@ int gather_f32(
         elem_count,
         gather_f32_kernel<I>,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         src_start_offset,
         ids,
-        ids_layout.dims,
-        ids_layout.strides,
-        ids_layout.rank,
+        ids_layout,
         ids_start_offset,
         dim,
         dst,
@@ -381,19 +351,13 @@ int scatter_f32(
         scatter_f32_kernel<I>,
         add,
         dst,
-        dst_layout.dims,
-        dst_layout.strides,
-        dst_layout.rank,
+        dst_layout,
         dst_start_offset,
         ids,
-        ids_layout.dims,
-        ids_layout.strides,
-        ids_layout.rank,
+        ids_layout,
         ids_start_offset,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         src_start_offset,
         dim,
         src_elem_count,
@@ -440,18 +404,14 @@ int index_add_f32(
         elem_count,
         index_add_f32_kernel<I>,
         input,
-        input_layout.dims,
-        input_layout.strides,
-        input_layout.rank,
+        input_layout,
         input_start_offset,
         ids,
         ids_start_offset,
         ids_stride,
         ids_len,
         src,
-        src_layout.dims,
-        src_layout.strides,
-        src_layout.rank,
+        src_layout,
         src_start_offset,
         dim,
         dst,

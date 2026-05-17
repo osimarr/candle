@@ -77,7 +77,7 @@ extern "C" int hip_arg_sort_f32(
     if (last_dim == 0 || elem_count % last_dim != 0) {
         return set_error("arg_sort_f32 shape", hipErrorInvalidValue);
     }
-    return launch_1d(
+    return launch_1d_async(
         "arg_sort_f32",
         elem_count,
         arg_sort_f32_kernel,

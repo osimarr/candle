@@ -7,43 +7,39 @@ namespace {
 
 __device__ size_t base_index_for_output(
     size_t logical_index,
-    const size_t* dims,
-    const size_t* strides,
-    size_t rank,
+    const DeviceLayout& layout,
     size_t start_offset,
     uint64_t reduce_mask) {
     size_t storage = start_offset;
-    for (size_t rev = 0; rev < rank; ++rev) {
-        const size_t axis = rank - 1 - rev;
+    for (size_t rev = 0; rev < layout.rank; ++rev) {
+        const size_t axis = layout.rank - 1 - rev;
         const bool reduced = ((reduce_mask >> axis) & 1U) != 0;
-        const size_t out_dim = reduced ? 1 : dims[axis];
+        const size_t out_dim = reduced ? 1 : layout.dims[axis];
         const size_t index = out_dim == 0 ? 0 : logical_index % out_dim;
         if (out_dim != 0) {
             logical_index /= out_dim;
         }
-        storage += index * strides[axis];
+        storage += index * layout.strides[axis];
     }
     return storage;
 }
 
 __device__ size_t reduce_offset(
     size_t reduce_index,
-    const size_t* dims,
-    const size_t* strides,
-    size_t rank,
+    const DeviceLayout& layout,
     uint64_t reduce_mask) {
     size_t offset = 0;
-    for (size_t rev = 0; rev < rank; ++rev) {
-        const size_t axis = rank - 1 - rev;
+    for (size_t rev = 0; rev < layout.rank; ++rev) {
+        const size_t axis = layout.rank - 1 - rev;
         if (((reduce_mask >> axis) & 1U) == 0) {
             continue;
         }
-        const size_t dim = dims[axis];
+        const size_t dim = layout.dims[axis];
         const size_t index = dim == 0 ? 0 : reduce_index % dim;
         if (dim != 0) {
             reduce_index /= dim;
         }
-        offset += index * strides[axis];
+        offset += index * layout.strides[axis];
     }
     return offset;
 }
@@ -51,9 +47,7 @@ __device__ size_t reduce_offset(
 __global__ void reduce_f32_kernel(
     int op,
     const float* src,
-    const size_t* dims,
-    const size_t* strides,
-    size_t rank,
+    DeviceLayout layout,
     size_t start_offset,
     uint64_t reduce_mask,
     size_t reduce_count,
@@ -66,11 +60,11 @@ __global__ void reduce_f32_kernel(
     }
 
     const size_t base =
-        base_index_for_output(logical_index, dims, strides, rank, start_offset, reduce_mask);
+        base_index_for_output(logical_index, layout, start_offset, reduce_mask);
     if (op == 1) {
         float acc = 0.0f;
         for (size_t r = 0; r < reduce_count; ++r) {
-            acc += src[base + reduce_offset(r, dims, strides, rank, reduce_mask)];
+            acc += src[base + reduce_offset(r, layout, reduce_mask)];
         }
         dst[logical_index] = acc;
         return;
@@ -79,7 +73,7 @@ __global__ void reduce_f32_kernel(
     float best = src[base];
     uint32_t best_index = 0;
     for (size_t r = 1; r < reduce_count; ++r) {
-        const float value = src[base + reduce_offset(r, dims, strides, rank, reduce_mask)];
+        const float value = src[base + reduce_offset(r, layout, reduce_mask)];
         const bool update_min = (op == 2 || op == 4) && value < best;
         const bool update_max = (op == 3 || op == 5) && value > best;
         if (update_min || update_max) {
@@ -123,9 +117,7 @@ extern "C" int hip_reduce_f32(
         reduce_f32_kernel,
         op,
         src,
-        layout.dims,
-        layout.strides,
-        layout.rank,
+        layout,
         start_offset,
         reduce_mask,
         reduce_count,

@@ -5,9 +5,7 @@ namespace {
 template <typename T>
 __global__ void const_set_kernel(
     T* dst,
-    const size_t* dims,
-    const size_t* strides,
-    size_t rank,
+    DeviceLayout layout,
     size_t start_offset,
     T value,
     size_t elem_count) {
@@ -15,8 +13,7 @@ __global__ void const_set_kernel(
     if (logical_index >= elem_count) {
         return;
     }
-    const size_t dst_index =
-        storage_index(logical_index, dims, strides, rank, start_offset);
+    const size_t dst_index = storage_index(logical_index, layout, start_offset);
     dst[dst_index] = value;
 }
 
@@ -45,9 +42,7 @@ int const_set(
         elem_count,
         const_set_kernel<T>,
         dst,
-        layout.dims,
-        layout.strides,
-        layout.rank,
+        layout,
         start_offset,
         value,
         elem_count);

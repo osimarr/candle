@@ -1,4 +1,4 @@
-use crate::{Allocator, Buffer, Result, Stream};
+use crate::{Allocator, Buffer, FreePolicy, Result, Stream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -27,11 +27,13 @@ impl Device {
             }
             crate::hip::set_device(ordinal)?;
         }
+        let allocator = Allocator::new(ordinal);
+        allocator.set_free_policy(FreePolicy::DeferUntilSynchronize)?;
         Ok(Self {
             inner: Arc::new(DeviceInner {
                 ordinal,
                 default_stream: Stream::new(ordinal),
-                allocator: Allocator::new(ordinal),
+                allocator,
                 seed: AtomicU64::new(0),
             }),
         })
