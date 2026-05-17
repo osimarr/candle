@@ -14,6 +14,7 @@ accelerate-src = { workspace = true, optional = true }
 byteorder = { workspace = true }
 candle-kernels = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
+candle-rocm-kernels = { workspace = true, optional = true }
 objc2-metal = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
 cudarc = { workspace = true, optional = true }
@@ -47,7 +48,7 @@ criterion = { workspace = true }
 [features]
 default = []
 cuda = ["cudarc", "dep:candle-kernels", "candle-ug?/cuda"]
-rocm = []
+rocm = ["dep:candle-rocm-kernels"]
 cudnn = ["cuda", "cudarc/cudnn"]
 nccl = ["cuda", "cudarc/nccl"]
 mkl = ["dep:libc", "dep:intel-mkl-src"]
