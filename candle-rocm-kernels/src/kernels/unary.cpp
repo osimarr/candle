@@ -83,6 +83,22 @@ __global__ void unary_bf16_kernel(
     dst[logical_index] = f32_to_bf16_bits(unary_value(op, bf16_bits_to_f32(src[src_index])));
 }
 
+__global__ void unary_f8e4m3_kernel(
+    int op,
+    const uint8_t* src,
+    DeviceLayout layout,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t elem_count) {
+    const size_t logical_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (logical_index >= elem_count) {
+        return;
+    }
+    const size_t src_index = storage_index(logical_index, layout, start_offset);
+    dst[logical_index] =
+        f32_to_f8e4m3_bits(unary_value(op, f8e4m3_bits_to_f32(src[src_index])));
+}
+
 } // namespace
 
 extern "C" int hip_unary_f32(
@@ -139,6 +155,37 @@ extern "C" int hip_unary_bf16(
         "unary_bf16",
         elem_count,
         unary_bf16_kernel,
+        op,
+        src,
+        src_layout,
+        start_offset,
+        dst,
+        elem_count);
+}
+
+extern "C" int hip_unary_f8e4m3(
+    int ordinal,
+    int op,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout src_layout;
+    rc = src_layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "unary_f8e4m3",
+        elem_count,
+        unary_f8e4m3_kernel,
         op,
         src,
         src_layout,

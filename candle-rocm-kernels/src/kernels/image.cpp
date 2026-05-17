@@ -474,3 +474,152 @@ extern "C" int hip_upsample_bilinear2d_bf16(
         align_corners != 0,
         elem_count);
 }
+
+extern "C" int hip_pool2d_f8e4m3(
+    int ordinal,
+    int op,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t k_h,
+    size_t k_w,
+    size_t s_h,
+    size_t s_w,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "pool2d_f8e4m3",
+        elem_count,
+        pool2d_kernel<F8E4M3Storage>,
+        op,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        k_h,
+        k_w,
+        s_h,
+        s_w,
+        out_h,
+        out_w,
+        elem_count);
+}
+
+extern "C" int hip_upsample_nearest1d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t out_size,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    if (rank != 3) {
+        return set_error("upsample_nearest1d layout rank", hipErrorInvalidValue);
+    }
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_nearest1d_f8e4m3",
+        elem_count,
+        upsample_nearest1d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        out_size,
+        elem_count);
+}
+
+extern "C" int hip_upsample_nearest2d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_nearest2d_f8e4m3",
+        elem_count,
+        upsample_nearest2d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        out_h,
+        out_w,
+        elem_count);
+}
+
+extern "C" int hip_upsample_bilinear2d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t out_h,
+    size_t out_w,
+    double scale_h,
+    double scale_w,
+    int align_corners,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = init_4d_layout(layout, dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "upsample_bilinear2d_f8e4m3",
+        elem_count,
+        upsample_bilinear2d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        out_h,
+        out_w,
+        scale_h,
+        scale_w,
+        align_corners != 0,
+        elem_count);
+}

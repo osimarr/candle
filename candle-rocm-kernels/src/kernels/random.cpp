@@ -139,3 +139,47 @@ extern "C" int hip_random_normal_bf16(
         mean,
         std);
 }
+
+extern "C" int hip_random_uniform_f8e4m3(
+    int ordinal,
+    uint8_t* dst,
+    size_t elem_count,
+    uint64_t seed,
+    float lo,
+    float up) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    return launch_1d_async(
+        "random_uniform_f8e4m3",
+        elem_count,
+        random_uniform_kernel<F8E4M3Storage>,
+        as_f8e4m3(dst),
+        elem_count,
+        seed,
+        lo,
+        up - lo);
+}
+
+extern "C" int hip_random_normal_f8e4m3(
+    int ordinal,
+    uint8_t* dst,
+    size_t elem_count,
+    uint64_t seed,
+    float mean,
+    float std) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    return launch_1d_async(
+        "random_normal_f8e4m3",
+        elem_count,
+        random_normal_kernel<F8E4M3Storage>,
+        as_f8e4m3(dst),
+        elem_count,
+        seed,
+        mean,
+        std);
+}

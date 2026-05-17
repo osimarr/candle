@@ -32,6 +32,7 @@ impl std::fmt::Debug for Buffer {
 }
 
 impl Buffer {
+    #[cfg_attr(not(hip_runtime), allow(unused_mut))]
     pub(crate) fn new(mut allocation: AllocationHandle, zeroed: bool) -> Result<Self> {
         let bytes = allocation.size_in_bytes();
         #[cfg(hip_runtime)]

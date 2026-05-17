@@ -245,3 +245,98 @@ extern "C" int hip_elu_bf16(
         elem_count,
         alpha);
 }
+
+extern "C" int hip_affine_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t elem_count,
+    float mul,
+    float add) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "affine_f8e4m3",
+        elem_count,
+        affine_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        elem_count,
+        mul,
+        add);
+}
+
+extern "C" int hip_powf_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t elem_count,
+    float value) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "powf_f8e4m3",
+        elem_count,
+        powf_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        elem_count,
+        value);
+}
+
+extern "C" int hip_elu_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t* dst,
+    size_t elem_count,
+    float alpha) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "elu_f8e4m3",
+        elem_count,
+        elu_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        as_f8e4m3(dst),
+        elem_count,
+        alpha);
+}

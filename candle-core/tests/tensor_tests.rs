@@ -238,6 +238,25 @@ fn rocm_bf16_argsort() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_f8e4m3_argsort() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let data = &[[3f32, 1., 4., 1.125, 5.], [2.25, 1., 7., 8., 2.]];
+    let tensor = Tensor::new(data, &device)?.to_dtype(DType::F8E4M3)?;
+    let indexes = tensor.arg_sort_last_dim(true)?;
+    assert_eq!(
+        indexes.to_vec2::<u32>()?,
+        [[1, 3, 0, 2, 4], [1, 4, 0, 2, 3]],
+    );
+    let indexes = tensor.arg_sort_last_dim(false)?;
+    assert_eq!(
+        indexes.to_vec2::<u32>()?,
+        [[4, 2, 0, 3, 1], [3, 2, 0, 4, 1]],
+    );
+    Ok(())
+}
+
 /// Test sorting a large tensor that exceeds 1024 elements.
 fn asort_big(device: &Device) -> Result<()> {
     // Skip on metal for now
@@ -1224,6 +1243,127 @@ fn rocm_bf16_core_dispatches() -> Result<()> {
     assert_eq!(random_uniform.dtype(), DType::BF16);
     let random_normal = x.randn_like(0., 1.)?;
     assert_eq!(random_normal.dtype(), DType::BF16);
+
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+fn assert_close_flat(tensor: &Tensor, expected: &[f32], max_abs_diff: f32) -> Result<()> {
+    let got = tensor
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    assert_eq!(got.len(), expected.len());
+    for (index, (got, expected)) in got.iter().zip(expected).enumerate() {
+        assert!(
+            (got - expected).abs() <= max_abs_diff,
+            "index {index}: got {got}, expected {expected}, max abs diff {max_abs_diff}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_f8e4m3_core_dispatches() -> Result<()> {
+    let device = Device::new_rocm(0)?;
+    let x = Tensor::new(&[[1f32, 2.], [3., 4.]], &device)?.to_dtype(DType::F8E4M3)?;
+
+    let cast = x.to_dtype(DType::F32)?.to_dtype(DType::F8E4M3)?;
+    assert_eq!(cast.dtype(), DType::F8E4M3);
+    assert_close_flat(&cast, &[1., 2., 3., 4.], 0.)?;
+
+    let ids = Tensor::new(&[0u32, 2u32, 1u32], &device)?;
+    let t = Tensor::new(&[[0f32, 1f32], [2f32, 3f32], [4f32, 5f32]], &device)?
+        .to_dtype(DType::F8E4M3)?;
+    let selected = t.index_select(&ids, 0)?;
+    assert!(selected.device().is_rocm());
+    assert_eq!(selected.dtype(), DType::F8E4M3);
+    assert_close_flat(&selected, &[0., 1., 4., 5., 2., 3.], 0.)?;
+
+    let lhs = Tensor::new(&[[1f32, 2., 3.], [4., 5., 6.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let rhs = Tensor::new(&[[1f32, 2.], [3., 4.], [5., 6.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let mm = lhs.matmul(&rhs)?;
+    assert_eq!(mm.dtype(), DType::F8E4M3);
+    assert_close_flat(&mm, &[22., 28., 48., 64.], 0.)?;
+    let added = (&mm + &mm)?;
+    assert_eq!(added.dtype(), DType::F8E4M3);
+    assert_close_flat(&added, &[44., 56., 96., 128.], 0.)?;
+
+    let affine = x.affine(2., -1.)?;
+    assert_eq!(affine.dtype(), DType::F8E4M3);
+    assert_close_flat(&affine, &[1., 3., 5., 7.], 0.)?;
+
+    let pow = x.powf(2.)?;
+    assert_eq!(pow.dtype(), DType::F8E4M3);
+    assert_close_flat(&pow, &[1., 4., 9., 16.], 0.)?;
+
+    let elu = Tensor::new(&[-1f32, 0.5], &device)?
+        .to_dtype(DType::F8E4M3)?
+        .elu(1.)?;
+    assert_eq!(elu.dtype(), DType::F8E4M3);
+    assert_close_flat(&elu, &[-0.625, 0.5], 0.)?;
+
+    let sum = x.sum_keepdim(1)?;
+    assert_eq!(sum.dtype(), DType::F8E4M3);
+    assert_close_flat(&sum, &[3., 7.], 0.)?;
+    let max = x.max_keepdim(0)?;
+    assert_eq!(max.dtype(), DType::F8E4M3);
+    assert_close_flat(&max, &[3., 4.], 0.)?;
+
+    let cmp_rhs = Tensor::new(&[[2f32, 2.], [2., 2.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let cmp = x.gt(&cmp_rhs)?;
+    assert_eq!(cmp.dtype(), DType::U8);
+    assert_eq!(cmp.to_vec2::<u8>()?, &[[0, 0], [1, 1]]);
+
+    let mask = Tensor::new(&[[1u8, 0], [0, 1]], &device)?;
+    let on_true = Tensor::new(&[[10f32, 20.], [30., 40.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let on_false = Tensor::new(&[[1f32, 2.], [3., 4.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let where_selected = mask.where_cond(&on_true, &on_false)?;
+    assert_eq!(where_selected.dtype(), DType::F8E4M3);
+    assert_close_flat(&where_selected, &[10., 2., 3., 40.], 0.)?;
+
+    let gather_src =
+        Tensor::new(&[[10f32, 20., 30.], [40., 50., 60.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let gather_ids = Tensor::new(&[[2u32, 0], [1, 2]], &device)?;
+    let gathered = gather_src.gather(&gather_ids, 1)?;
+    assert_eq!(gathered.dtype(), DType::F8E4M3);
+    assert_close_flat(&gathered, &[30., 10., 48., 60.], 0.)?;
+
+    let init = Tensor::ones((2, 2), DType::F8E4M3, &device)?;
+    let index_ids = Tensor::new(&[1u32, 0], &device)?;
+    let add_src = Tensor::new(&[[2f32, 3.], [4., 5.]], &device)?.to_dtype(DType::F8E4M3)?;
+    let indexed = init.index_add(&index_ids, &add_src, 1)?;
+    assert_eq!(indexed.dtype(), DType::F8E4M3);
+    assert_close_flat(&indexed, &[4., 3., 6., 5.], 0.)?;
+
+    let scatter_ids = Tensor::new(&[[1u32, 0], [0, 1]], &device)?;
+    let scattered =
+        Tensor::zeros((2, 2), DType::F8E4M3, &device)?.scatter(&scatter_ids, &add_src, 1)?;
+    assert_eq!(scattered.dtype(), DType::F8E4M3);
+    assert_close_flat(&scattered, &[3., 2., 4., 5.], 0.)?;
+
+    let image = Tensor::new(&[[[[1f32, 2.], [3., 4.]]]], &device)?.to_dtype(DType::F8E4M3)?;
+    let pooled = image.avg_pool2d((2, 2))?;
+    assert_eq!(pooled.dtype(), DType::F8E4M3);
+    assert_close_flat(&pooled, &[2.5], 0.)?;
+
+    let upsampled = Tensor::new(&[[[1f32, 2.]]], &device)?
+        .to_dtype(DType::F8E4M3)?
+        .upsample_nearest1d(4)?;
+    assert_eq!(upsampled.dtype(), DType::F8E4M3);
+    assert_close_flat(&upsampled, &[1., 1., 2., 2.], 0.)?;
+
+    let conv_input = Tensor::new(&[[[1f32, 2., 3.]]], &device)?.to_dtype(DType::F8E4M3)?;
+    let conv_kernel = Tensor::new(&[[[1f32, 2.]]], &device)?.to_dtype(DType::F8E4M3)?;
+    let conv = conv_input.conv1d(&conv_kernel, 0, 1, 1, 1)?;
+    assert_eq!(conv.dtype(), DType::F8E4M3);
+    assert_close_flat(&conv, &[5., 8.], 0.)?;
+
+    let random_uniform = x.rand_like(0., 1.)?;
+    assert_eq!(random_uniform.dtype(), DType::F8E4M3);
+    let random_normal = x.randn_like(0., 1.)?;
+    assert_eq!(random_normal.dtype(), DType::F8E4M3);
 
     Ok(())
 }

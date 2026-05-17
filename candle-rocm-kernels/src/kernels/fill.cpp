@@ -97,3 +97,15 @@ extern "C" int hip_const_set_bf16(
     size_t elem_count) {
     return const_set("const_set_bf16", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
 }
+
+extern "C" int hip_const_set_f8e4m3(
+    int ordinal,
+    uint8_t* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint8_t value,
+    size_t elem_count) {
+    return const_set("const_set_f8e4m3", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}

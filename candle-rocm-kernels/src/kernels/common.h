@@ -2,6 +2,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -91,6 +92,83 @@ __device__ inline float bf16_bits_to_f32(uint16_t value) {
     return __uint_as_float(static_cast<uint32_t>(value) << 16);
 }
 
+struct F8E4M3Storage {
+    uint8_t bits = 0;
+};
+
+static_assert(sizeof(F8E4M3Storage) == 1);
+static_assert(alignof(F8E4M3Storage) == 1);
+
+inline const F8E4M3Storage* as_f8e4m3(const uint8_t* ptr) {
+    return reinterpret_cast<const F8E4M3Storage*>(ptr);
+}
+
+inline F8E4M3Storage* as_f8e4m3(uint8_t* ptr) {
+    return reinterpret_cast<F8E4M3Storage*>(ptr);
+}
+
+__device__ inline float f8e4m3_bits_to_f32(uint8_t value) {
+    const uint8_t abs_value = value & 0x7f;
+    if (abs_value == 0x7f) {
+        return NAN;
+    }
+    const float sign = (value & 0x80) == 0 ? 1.0f : -1.0f;
+    const int exponent = abs_value >> 3;
+    const int mantissa = abs_value & 0x07;
+    if (exponent == 0) {
+        return sign * static_cast<float>(mantissa) * 0.001953125f;
+    }
+    return sign * exp2f(static_cast<float>(exponent - 7)) *
+           (1.0f + static_cast<float>(mantissa) * 0.125f);
+}
+
+__device__ inline uint8_t round_to_even_u8(float value) {
+    const float floor_value = floorf(value);
+    const float fraction = value - floor_value;
+    uint8_t rounded = static_cast<uint8_t>(floor_value);
+    if (fraction > 0.5f || (fraction == 0.5f && (rounded & 1U) != 0)) {
+        rounded += 1;
+    }
+    return rounded;
+}
+
+__device__ inline uint8_t f32_to_f8e4m3_bits(float value) {
+    const uint32_t raw = __float_as_uint(value);
+    const uint8_t sign = static_cast<uint8_t>((raw >> 24) & 0x80);
+    const float abs_value = fabsf(value);
+    if (isnan(value)) {
+        return sign | 0x7f;
+    }
+    if (abs_value <= 0.0009765625f) {
+        return sign;
+    }
+    if (abs_value >= 464.0f) {
+        return sign | 0x7e;
+    }
+    if (abs_value < 0.015625f) {
+        const uint8_t mantissa = round_to_even_u8(abs_value * 512.0f);
+        return sign | (mantissa > 7 ? 0x08 : mantissa);
+    }
+    int exponent = static_cast<int>(floorf(log2f(abs_value)));
+    float scaled = abs_value / exp2f(static_cast<float>(exponent));
+    uint8_t mantissa = round_to_even_u8((scaled - 1.0f) * 8.0f);
+    if (mantissa == 8) {
+        mantissa = 0;
+        exponent += 1;
+    }
+    int biased_exponent = exponent + 7;
+    if (biased_exponent >= 15) {
+        if (biased_exponent > 15 || mantissa > 6) {
+            return sign | 0x7e;
+        }
+    }
+    if (biased_exponent <= 0) {
+        const uint8_t subnormal = round_to_even_u8(abs_value * 512.0f);
+        return sign | (subnormal > 7 ? 0x08 : subnormal);
+    }
+    return sign | static_cast<uint8_t>((biased_exponent << 3) | mantissa);
+}
+
 template <typename T>
 __device__ inline float to_f32(T value) {
     return static_cast<float>(value);
@@ -101,6 +179,11 @@ __device__ inline float to_f32<uint16_t>(uint16_t value) {
     return bf16_bits_to_f32(value);
 }
 
+template <>
+__device__ inline float to_f32<F8E4M3Storage>(F8E4M3Storage value) {
+    return f8e4m3_bits_to_f32(value.bits);
+}
+
 template <typename T>
 __device__ inline T from_f32(float value) {
     return static_cast<T>(value);
@@ -109,6 +192,11 @@ __device__ inline T from_f32(float value) {
 template <>
 __device__ inline uint16_t from_f32<uint16_t>(float value) {
     return f32_to_bf16_bits(value);
+}
+
+template <>
+__device__ inline F8E4M3Storage from_f32<F8E4M3Storage>(float value) {
+    return F8E4M3Storage{f32_to_f8e4m3_bits(value)};
 }
 
 inline dim3 grid_for(size_t elem_count) {

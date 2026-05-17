@@ -193,7 +193,7 @@ impl RocmStorage {
     }
 
     pub fn softmax_last_dim(&self, layout: &Layout) -> Result<(Self, Shape)> {
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(self.dtype, "softmax-last-dim").bt());
         }
         let mut op = self.op1(
@@ -215,7 +215,7 @@ impl RocmStorage {
     }
 
     pub fn sigmoid(&self, layout: &Layout) -> Result<(Self, Shape)> {
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(self.dtype, "sigmoid").bt());
         }
         let mut op = self.op1(
@@ -287,7 +287,7 @@ impl RocmStorage {
                 beta.dtype
             )
         }
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(self.dtype, "layer-norm").bt());
         }
         let op = self.op3(
@@ -331,7 +331,7 @@ impl RocmStorage {
                 sin.dtype
             )
         }
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(self.dtype, "rotary-emb").bt());
         }
         let op = self.op3(
@@ -379,7 +379,7 @@ impl RocmStorage {
                 sin.dtype
             )
         }
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(self.dtype, "rotary-emb").bt());
         }
         let op = self.op3(
@@ -412,7 +412,7 @@ impl RocmStorage {
         asc: bool,
         last_dim: usize,
     ) -> Result<Option<(Self, Shape)>> {
-        if !matches!(self.dtype, DType::F32 | DType::BF16) {
+        if !matches!(self.dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Ok(None);
         }
         let mut op = self.op1(
@@ -685,13 +685,21 @@ fn kernel_scalar(scalar: crate::scalar::Scalar) -> Result<kernels::KernelScalar>
         crate::scalar::Scalar::U8(value) => Ok(kernels::KernelScalar::U8(value)),
         crate::scalar::Scalar::U32(value) => Ok(kernels::KernelScalar::U32(value)),
         crate::scalar::Scalar::BF16(value) => Ok(kernels::KernelScalar::BF16(value.to_bits())),
+        crate::scalar::Scalar::F8E4M3(value) => Ok(kernels::KernelScalar::F8E4M3(value.to_bits())),
         scalar => Err(Error::UnsupportedDTypeForOp(scalar.dtype(), "const_set").bt()),
     }
 }
 
-fn f32_or_bf16_output(dtype: DType) -> DType {
-    if dtype == DType::BF16 {
-        DType::BF16
+fn native_float_output(dtype: DType) -> DType {
+    match dtype {
+        DType::BF16 | DType::F8E4M3 => dtype,
+        _ => DType::F32,
+    }
+}
+
+fn same_native_float_output(lhs: DType, rhs: DType) -> DType {
+    if matches!(lhs, DType::BF16 | DType::F8E4M3) && lhs == rhs {
+        lhs
     } else {
         DType::F32
     }
@@ -923,7 +931,7 @@ impl BackendStorage for RocmStorage {
     }
 
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1(
             "affine",
             Some(kernel_output_for_layout(layout, output_dtype)?),
@@ -948,7 +956,7 @@ impl BackendStorage for RocmStorage {
     }
 
     fn powf(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1(
             "powf",
             Some(kernel_output_for_layout(layout, output_dtype)?),
@@ -971,7 +979,7 @@ impl BackendStorage for RocmStorage {
     }
 
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1("elu", Some(kernel_output_for_layout(layout, output_dtype)?))?;
         op.input_layout = Some(kernel_layout(layout)?);
         if let Some(buffer) = kernels::tensor::try_elu(&op, alpha as f32).map_err(Error::from)? {
@@ -993,7 +1001,7 @@ impl BackendStorage for RocmStorage {
     fn reduce_op(&self, op: ReduceOp, layout: &Layout, dims: &[usize]) -> Result<Self> {
         let output_dtype = match op {
             ReduceOp::ArgMin | ReduceOp::ArgMax => DType::U32,
-            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max => f32_or_bf16_output(self.dtype),
+            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max => native_float_output(self.dtype),
         };
         let mut kernel_op = self.op1(
             op.name(),
@@ -1065,7 +1073,7 @@ impl BackendStorage for RocmStorage {
 
     fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
         let output_dtype = match self.dtype {
-            DType::BF16 => DType::BF16,
+            DType::BF16 | DType::F8E4M3 => self.dtype,
             _ => DType::F32,
         };
         let mut op = self.op1(
@@ -1095,11 +1103,7 @@ impl BackendStorage for RocmStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
-        let output_dtype = if self.dtype == DType::BF16 && rhs.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, rhs.dtype);
         let mut op = self.op2(
             B::NAME,
             rhs,
@@ -1171,11 +1175,7 @@ impl BackendStorage for RocmStorage {
     ) -> Result<Self> {
         let l_out = params.l_out();
         let elem_count = params.b_size * params.c_out * l_out;
-        let output_dtype = if self.dtype == DType::BF16 && kernel.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, kernel.dtype);
         let mut op = self.op2(
             "conv1d",
             kernel,
@@ -1218,11 +1218,7 @@ impl BackendStorage for RocmStorage {
     ) -> Result<Self> {
         let l_out = params.l_out();
         let elem_count = params.b_size * params.c_out * l_out;
-        let output_dtype = if self.dtype == DType::BF16 && kernel.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, kernel.dtype);
         let mut op = self.op2(
             "conv_transpose1d",
             kernel,
@@ -1265,11 +1261,7 @@ impl BackendStorage for RocmStorage {
     ) -> Result<Self> {
         let (out_h, out_w) = (params.out_h(), params.out_w());
         let elem_count = params.b_size * params.c_out * out_h * out_w;
-        let output_dtype = if self.dtype == DType::BF16 && kernel.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, kernel.dtype);
         let mut op = self.op2(
             "conv2d",
             kernel,
@@ -1313,11 +1305,7 @@ impl BackendStorage for RocmStorage {
     ) -> Result<Self> {
         let (out_h, out_w) = (params.out_h(), params.out_w());
         let elem_count = params.b_size * params.c_out * out_h * out_w;
-        let output_dtype = if self.dtype == DType::BF16 && kernel.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, kernel.dtype);
         let mut op = self.op2(
             "conv_transpose2d",
             kernel,
@@ -1363,7 +1351,7 @@ impl BackendStorage for RocmStorage {
             * dims[1]
             * ((dims[2] - kernel.0) / stride.0 + 1)
             * ((dims[3] - kernel.1) / stride.1 + 1);
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1("avg_pool2d", Some(kernel_output(output_dtype, elem_count)?))?;
         op.input_layout = Some(kernel_layout(l)?);
         if let Some(buffer) =
@@ -1395,7 +1383,7 @@ impl BackendStorage for RocmStorage {
             * dims[1]
             * ((dims[2] - kernel.0) / stride.0 + 1)
             * ((dims[3] - kernel.1) / stride.1 + 1);
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1("max_pool2d", Some(kernel_output(output_dtype, elem_count)?))?;
         op.input_layout = Some(kernel_layout(l)?);
         if let Some(buffer) =
@@ -1419,7 +1407,7 @@ impl BackendStorage for RocmStorage {
     fn upsample_nearest1d(&self, l: &Layout, size: usize) -> Result<Self> {
         let dims = l.dims();
         let elem_count = dims[0] * dims[1] * size;
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1(
             "upsample_nearest1d",
             Some(kernel_output(output_dtype, elem_count)?),
@@ -1446,7 +1434,7 @@ impl BackendStorage for RocmStorage {
     fn upsample_nearest2d(&self, l: &Layout, h: usize, w: usize) -> Result<Self> {
         let dims = l.dims();
         let elem_count = dims[0] * dims[1] * h * w;
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1(
             "upsample_nearest2d",
             Some(kernel_output(output_dtype, elem_count)?),
@@ -1481,7 +1469,7 @@ impl BackendStorage for RocmStorage {
     ) -> Result<Self> {
         let dims = l.dims();
         let elem_count = dims[0] * dims[1] * h * w;
-        let output_dtype = f32_or_bf16_output(self.dtype);
+        let output_dtype = native_float_output(self.dtype);
         let mut op = self.op1(
             "upsample_bilinear2d",
             Some(kernel_output(output_dtype, elem_count)?),
@@ -1638,11 +1626,7 @@ impl BackendStorage for RocmStorage {
         src_l: &Layout,
         dim: usize,
     ) -> Result<Self> {
-        let output_dtype = if self.dtype == DType::BF16 && src.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, src.dtype);
         let op = self.op3(
             "index_add",
             ids,
@@ -1681,11 +1665,7 @@ impl BackendStorage for RocmStorage {
         rhs_l: &Layout,
     ) -> Result<Self> {
         let (b, m, n, _) = bmnk;
-        let output_dtype = if self.dtype == DType::BF16 && rhs.dtype == DType::BF16 {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let output_dtype = same_native_float_output(self.dtype, rhs.dtype);
         let mut op = self.op2("matmul", rhs, Some(kernel_output(output_dtype, b * m * n)?))?;
         op.lhs_layout = Some(kernel_layout(lhs_l)?);
         op.rhs_layout = Some(kernel_layout(rhs_l)?);
@@ -1883,7 +1863,7 @@ impl BackendDevice for RocmDevice {
     }
 
     fn rand_uniform(&self, shape: &Shape, dtype: DType, lo: f64, up: f64) -> Result<Self::Storage> {
-        if !matches!(dtype, DType::F32 | DType::BF16) {
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(dtype, "rand_uniform").bt());
         }
         let op = kernels::device::AllocOp {
@@ -1916,7 +1896,7 @@ impl BackendDevice for RocmDevice {
         mean: f64,
         std: f64,
     ) -> Result<Self::Storage> {
-        if !matches!(dtype, DType::F32 | DType::BF16) {
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F8E4M3) {
             return Err(Error::UnsupportedDTypeForOp(dtype, "rand_normal").bt());
         }
         let op = kernels::device::AllocOp {

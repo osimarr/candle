@@ -162,3 +162,39 @@ extern "C" int hip_reduce_bf16(
         static_cast<uint32_t*>(dst),
         elem_count);
 }
+
+extern "C" int hip_reduce_f8e4m3(
+    int ordinal,
+    int op,
+    const uint8_t* src,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint64_t reduce_mask,
+    size_t reduce_count,
+    void* dst,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout layout;
+    rc = layout.init(dims, strides, rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "reduce_f8e4m3",
+        elem_count,
+        reduce_kernel<F8E4M3Storage>,
+        op,
+        as_f8e4m3(src),
+        layout,
+        start_offset,
+        reduce_mask,
+        reduce_count,
+        as_f8e4m3(static_cast<uint8_t*>(dst)),
+        static_cast<uint32_t*>(dst),
+        elem_count);
+}

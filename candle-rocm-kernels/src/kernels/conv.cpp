@@ -748,3 +748,243 @@ extern "C" int hip_conv_transpose2d_bf16(
         out_w,
         elem_count);
 }
+
+extern "C" int hip_conv1d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    const uint8_t* kernel,
+    const size_t* kernel_dims,
+    const size_t* kernel_strides,
+    size_t kernel_rank,
+    size_t kernel_start_offset,
+    uint8_t* dst,
+    size_t padding,
+    size_t stride,
+    size_t dilation,
+    size_t l_out,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    if (src_rank != 3 || kernel_rank != 3) {
+        return set_error("conv1d rank", hipErrorInvalidValue);
+    }
+    DeviceLayout src_layout;
+    rc = init_layout(src_layout, src_dims, src_strides, src_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    DeviceLayout kernel_layout;
+    rc = init_layout(kernel_layout, kernel_dims, kernel_strides, kernel_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "conv1d_f8e4m3",
+        elem_count,
+        conv1d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        src_layout,
+        src_start_offset,
+        as_f8e4m3(kernel),
+        kernel_layout,
+        kernel_start_offset,
+        as_f8e4m3(dst),
+        src_dims[0],
+        kernel_dims[0],
+        src_dims[1],
+        src_dims[2],
+        kernel_dims[2],
+        padding,
+        stride,
+        dilation,
+        l_out,
+        elem_count);
+}
+
+extern "C" int hip_conv_transpose1d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    const uint8_t* kernel,
+    const size_t* kernel_dims,
+    const size_t* kernel_strides,
+    size_t kernel_rank,
+    size_t kernel_start_offset,
+    uint8_t* dst,
+    size_t padding,
+    size_t stride,
+    size_t dilation,
+    size_t l_out,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    if (src_rank != 3 || kernel_rank != 3) {
+        return set_error("conv_transpose1d rank", hipErrorInvalidValue);
+    }
+    DeviceLayout src_layout;
+    rc = init_layout(src_layout, src_dims, src_strides, src_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    DeviceLayout kernel_layout;
+    rc = init_layout(kernel_layout, kernel_dims, kernel_strides, kernel_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "conv_transpose1d_f8e4m3",
+        elem_count,
+        conv_transpose1d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        src_layout,
+        src_start_offset,
+        as_f8e4m3(kernel),
+        kernel_layout,
+        kernel_start_offset,
+        as_f8e4m3(dst),
+        src_dims[0],
+        kernel_dims[1],
+        src_dims[1],
+        src_dims[2],
+        kernel_dims[2],
+        padding,
+        stride,
+        dilation,
+        l_out,
+        elem_count);
+}
+
+extern "C" int hip_conv2d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    const uint8_t* kernel,
+    const size_t* kernel_dims,
+    const size_t* kernel_strides,
+    size_t kernel_rank,
+    size_t kernel_start_offset,
+    uint8_t* dst,
+    size_t padding,
+    size_t stride,
+    size_t dilation,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    if (src_rank != 4 || kernel_rank != 4) {
+        return set_error("conv2d rank", hipErrorInvalidValue);
+    }
+    DeviceLayout src_layout;
+    rc = init_layout(src_layout, src_dims, src_strides, src_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    DeviceLayout kernel_layout;
+    rc = init_layout(kernel_layout, kernel_dims, kernel_strides, kernel_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "conv2d_f8e4m3",
+        elem_count,
+        conv2d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        src_layout,
+        src_start_offset,
+        as_f8e4m3(kernel),
+        kernel_layout,
+        kernel_start_offset,
+        as_f8e4m3(dst),
+        src_dims[0],
+        kernel_dims[0],
+        src_dims[1],
+        src_dims[2],
+        src_dims[3],
+        kernel_dims[2],
+        kernel_dims[3],
+        padding,
+        stride,
+        dilation,
+        out_h,
+        out_w,
+        elem_count);
+}
+
+extern "C" int hip_conv_transpose2d_f8e4m3(
+    int ordinal,
+    const uint8_t* src,
+    const size_t* src_dims,
+    const size_t* src_strides,
+    size_t src_rank,
+    size_t src_start_offset,
+    const uint8_t* kernel,
+    const size_t* kernel_dims,
+    const size_t* kernel_strides,
+    size_t kernel_rank,
+    size_t kernel_start_offset,
+    uint8_t* dst,
+    size_t padding,
+    size_t stride,
+    size_t dilation,
+    size_t out_h,
+    size_t out_w,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    if (src_rank != 4 || kernel_rank != 4) {
+        return set_error("conv_transpose2d rank", hipErrorInvalidValue);
+    }
+    DeviceLayout src_layout;
+    rc = init_layout(src_layout, src_dims, src_strides, src_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    DeviceLayout kernel_layout;
+    rc = init_layout(kernel_layout, kernel_dims, kernel_strides, kernel_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "conv_transpose2d_f8e4m3",
+        elem_count,
+        conv_transpose2d_kernel<F8E4M3Storage>,
+        as_f8e4m3(src),
+        src_layout,
+        src_start_offset,
+        as_f8e4m3(kernel),
+        kernel_layout,
+        kernel_start_offset,
+        as_f8e4m3(dst),
+        src_dims[0],
+        kernel_dims[1],
+        src_dims[1],
+        src_dims[2],
+        src_dims[3],
+        kernel_dims[2],
+        kernel_dims[3],
+        padding,
+        stride,
+        dilation,
+        out_h,
+        out_w,
+        elem_count);
+}

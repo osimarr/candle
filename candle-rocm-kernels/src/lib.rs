@@ -1,7 +1,7 @@
 //! ROCm kernel dispatch surface for Candle.
 //!
 //! `candle-core` calls into this crate with typed ROCm operation descriptors
-//! first. When compiled with HIP support, supported f32 and bf16 operation
+//! first. When compiled with HIP support, supported f32, bf16, and fp8 operation
 //! slices launch HIP kernels behind these entry points; unsupported operations
 //! still use fallback closures while coverage is expanded.
 
@@ -89,6 +89,7 @@ pub enum KernelScalar {
     U8(u8),
     U32(u32),
     BF16(u16),
+    F8E4M3(u8),
 }
 
 impl KernelScalar {
@@ -98,6 +99,7 @@ impl KernelScalar {
             Self::U8(_) => KernelDType::U8,
             Self::U32(_) => KernelDType::U32,
             Self::BF16(_) => KernelDType::BF16,
+            Self::F8E4M3(_) => KernelDType::F8E4M3,
         }
     }
 }
@@ -377,7 +379,10 @@ pub mod device {
         }
         #[cfg(hip_runtime)]
         {
-            if !matches!(op.output.dtype(), KernelDType::F32 | KernelDType::BF16) {
+            if !matches!(
+                op.output.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) {
                 return Ok(None);
             }
             let dst = op.device.allocate(
@@ -391,6 +396,9 @@ pub mod device {
                 }
                 KernelDType::BF16 => {
                     crate::hip::random_uniform_bf16(&dst, op.output.elem_count(), seed, lo, up)?
+                }
+                KernelDType::F8E4M3 => {
+                    crate::hip::random_uniform_f8e4m3(&dst, op.output.elem_count(), seed, lo, up)?
                 }
                 _ => unreachable!(),
             }
@@ -411,7 +419,10 @@ pub mod device {
         }
         #[cfg(hip_runtime)]
         {
-            if !matches!(op.output.dtype(), KernelDType::F32 | KernelDType::BF16) {
+            if !matches!(
+                op.output.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) {
                 return Ok(None);
             }
             let dst = op.device.allocate(
@@ -425,6 +436,9 @@ pub mod device {
                 }
                 KernelDType::BF16 => {
                     crate::hip::random_normal_bf16(&dst, op.output.elem_count(), seed, mean, std)?
+                }
+                KernelDType::F8E4M3 => {
+                    crate::hip::random_normal_f8e4m3(&dst, op.output.elem_count(), seed, mean, std)?
                 }
                 _ => unreachable!(),
             }
@@ -451,7 +465,9 @@ pub mod device {
 }
 
 pub mod quantized {
-    use crate::{cpu_fallback, Buffer, Device, KernelDType, LayoutArg, RocmError, TensorArg};
+    use crate::{cpu_fallback, Buffer, Device, TensorArg};
+    #[cfg(hip_runtime)]
+    use crate::{KernelDType, LayoutArg, RocmError};
 
     #[derive(Clone, Debug)]
     pub struct QuantizedOp<'a> {
@@ -824,6 +840,7 @@ pub mod tensor {
             match dtype {
                 KernelDType::F32 => crate::hip::affine_f32(src, layout, dst, mul, add)?,
                 KernelDType::BF16 => crate::hip::affine_bf16(src, layout, dst, mul, add)?,
+                KernelDType::F8E4M3 => crate::hip::affine_f8e4m3(src, layout, dst, mul, add)?,
                 _ => unreachable!(),
             }
             Ok(true)
@@ -841,6 +858,7 @@ pub mod tensor {
             match dtype {
                 KernelDType::F32 => crate::hip::powf_f32(src, layout, dst, value)?,
                 KernelDType::BF16 => crate::hip::powf_bf16(src, layout, dst, value)?,
+                KernelDType::F8E4M3 => crate::hip::powf_f8e4m3(src, layout, dst, value)?,
                 _ => unreachable!(),
             }
             Ok(true)
@@ -858,6 +876,7 @@ pub mod tensor {
             match dtype {
                 KernelDType::F32 => crate::hip::elu_f32(src, layout, dst, alpha)?,
                 KernelDType::BF16 => crate::hip::elu_bf16(src, layout, dst, alpha)?,
+                KernelDType::F8E4M3 => crate::hip::elu_f8e4m3(src, layout, dst, alpha)?,
                 _ => unreachable!(),
             }
             Ok(true)
@@ -881,7 +900,10 @@ pub mod tensor {
             let Some(code) = reduce_opcode(op.name) else {
                 return Ok(None);
             };
-            if !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16) {
+            if !matches!(
+                op.input.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) {
                 return Ok(None);
             }
             let output_dtype = if matches!(code, 4 | 5) {
@@ -925,6 +947,15 @@ pub mod tensor {
                     &dst,
                     output.elem_count(),
                 )?,
+                KernelDType::F8E4M3 => crate::hip::reduce_f8e4m3(
+                    code,
+                    op.input.buffer(),
+                    layout,
+                    reduce_mask,
+                    reduce_count,
+                    &dst,
+                    output.elem_count(),
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -941,11 +972,20 @@ pub mod tensor {
         if op.input.dtype() == output.dtype() {
             return try_clone(op);
         }
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (layout, output);
+        }
         #[cfg(hip_runtime)]
         {
             let supported_cast = matches!(
                 (op.input.dtype(), output.dtype()),
-                (KernelDType::F32, KernelDType::BF16) | (KernelDType::BF16, KernelDType::F32)
+                (KernelDType::F32, KernelDType::BF16)
+                    | (KernelDType::BF16, KernelDType::F32)
+                    | (KernelDType::F32, KernelDType::F8E4M3)
+                    | (KernelDType::F8E4M3, KernelDType::F32)
+                    | (KernelDType::BF16, KernelDType::F8E4M3)
+                    | (KernelDType::F8E4M3, KernelDType::BF16)
             );
             if !supported_cast || output.elem_count() != layout.elem_count() {
                 return Ok(None);
@@ -961,6 +1001,30 @@ pub mod tensor {
                 }
                 (KernelDType::BF16, KernelDType::F32) => {
                     crate::hip::cast_bf16_to_f32(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::F32, KernelDType::F8E4M3) => {
+                    crate::hip::cast_f32_to_f8e4m3(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::F8E4M3, KernelDType::F32) => {
+                    crate::hip::cast_f8e4m3_to_f32(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::BF16, KernelDType::F8E4M3) => {
+                    let tmp = op.input.buffer().allocate_on_same_allocator(
+                        KernelDType::F32.storage_size_in_bytes(output.elem_count()),
+                        false,
+                    )?;
+                    crate::hip::cast_bf16_to_f32(op.input.buffer(), layout, &tmp)?;
+                    let contiguous = LayoutArg::new(vec![output.elem_count()], vec![1], 0)?;
+                    crate::hip::cast_f32_to_f8e4m3(&tmp, &contiguous, &dst)?;
+                }
+                (KernelDType::F8E4M3, KernelDType::BF16) => {
+                    let tmp = op.input.buffer().allocate_on_same_allocator(
+                        KernelDType::F32.storage_size_in_bytes(output.elem_count()),
+                        false,
+                    )?;
+                    crate::hip::cast_f8e4m3_to_f32(op.input.buffer(), layout, &tmp)?;
+                    let contiguous = LayoutArg::new(vec![output.elem_count()], vec![1], 0)?;
+                    crate::hip::cast_f32_to_bf16(&tmp, &contiguous, &dst)?;
                 }
                 _ => unreachable!(),
             }
@@ -1104,7 +1168,10 @@ pub mod tensor {
             if op.first.dtype() != KernelDType::U8
                 || op.second.dtype() != op.third.dtype()
                 || op.second.dtype() != output.dtype()
-                || !matches!(op.second.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.second.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
             {
                 return Ok(None);
             }
@@ -1140,6 +1207,15 @@ pub mod tensor {
                     false_layout,
                     &dst,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::where_u8_f8e4m3(
+                    op.first.buffer(),
+                    cond_layout,
+                    op.second.buffer(),
+                    true_layout,
+                    op.third.buffer(),
+                    false_layout,
+                    &dst,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1160,8 +1236,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
-                || output.dtype() != KernelDType::U32
+            if !matches!(
+                op.input.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) || output.dtype() != KernelDType::U32
                 || output.elem_count() != layout.elem_count()
                 || layout.dims().last().copied() != Some(last_dim)
                 || last_dim == 0
@@ -1180,6 +1258,9 @@ pub mod tensor {
                 }
                 KernelDType::BF16 => {
                     crate::hip::arg_sort_bf16(op.input.buffer(), layout, &dst, asc, last_dim)?
+                }
+                KernelDType::F8E4M3 => {
+                    crate::hip::arg_sort_f8e4m3(op.input.buffer(), layout, &dst, asc, last_dim)?
                 }
                 _ => unreachable!(),
             }
@@ -1206,7 +1287,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || src_layout.dims().len() != 3
                 || kernel_layout.dims().len() != 3
                 || src_layout.dims()[1] != kernel_layout.dims()[1]
@@ -1249,6 +1333,18 @@ pub mod tensor {
                     params.l_out,
                     params.elem_count,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::conv1d_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1274,7 +1370,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || src_layout.dims().len() != 3
                 || kernel_layout.dims().len() != 3
                 || src_layout.dims()[1] != kernel_layout.dims()[0]
@@ -1317,6 +1416,18 @@ pub mod tensor {
                     params.l_out,
                     params.elem_count,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::conv_transpose1d_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.l_out,
+                    params.elem_count,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1342,7 +1453,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || src_layout.dims().len() != 4
                 || kernel_layout.dims().len() != 4
                 || src_layout.dims()[1] != kernel_layout.dims()[1]
@@ -1387,6 +1501,19 @@ pub mod tensor {
                     params.out_w,
                     params.elem_count,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::conv2d_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1412,7 +1539,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || src_layout.dims().len() != 4
                 || kernel_layout.dims().len() != 4
                 || src_layout.dims()[1] != kernel_layout.dims()[0]
@@ -1457,6 +1587,19 @@ pub mod tensor {
                     params.out_w,
                     params.elem_count,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::conv_transpose2d_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    kernel_layout,
+                    &dst,
+                    params.padding,
+                    params.stride,
+                    params.dilation,
+                    params.out_h,
+                    params.out_w,
+                    params.elem_count,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1483,7 +1626,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.input.dtype() != output.dtype()
-                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.input.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || layout.dims().len() != 4
                 || kernel.0 == 0
                 || kernel.1 == 0
@@ -1526,6 +1672,16 @@ pub mod tensor {
                     out_h,
                     out_w,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::pool2d_f8e4m3(
+                    if max_pool { 2 } else { 1 },
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    kernel,
+                    stride,
+                    out_h,
+                    out_w,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1547,7 +1703,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.input.dtype() != output.dtype()
-                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.input.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || layout.dims().len() != 3
                 || out_size == 0
             {
@@ -1569,6 +1728,12 @@ pub mod tensor {
                 KernelDType::BF16 => {
                     crate::hip::upsample_nearest1d_bf16(op.input.buffer(), layout, &dst, out_size)?
                 }
+                KernelDType::F8E4M3 => crate::hip::upsample_nearest1d_f8e4m3(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_size,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1594,7 +1759,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.input.dtype() != output.dtype()
-                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.input.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || layout.dims().len() != 4
                 || out_h == 0
                 || out_w == 0
@@ -1619,6 +1787,13 @@ pub mod tensor {
                     out_w,
                 )?,
                 KernelDType::BF16 => crate::hip::upsample_nearest2d_bf16(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                )?,
+                KernelDType::F8E4M3 => crate::hip::upsample_nearest2d_f8e4m3(
                     op.input.buffer(),
                     layout,
                     &dst,
@@ -1654,7 +1829,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.input.dtype() != output.dtype()
-                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.input.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || layout.dims().len() != 4
                 || out_h == 0
                 || out_w == 0
@@ -1715,6 +1893,16 @@ pub mod tensor {
                     scale_w,
                     align_corners,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::upsample_bilinear2d_f8e4m3(
+                    op.input.buffer(),
+                    layout,
+                    &dst,
+                    out_h,
+                    out_w,
+                    scale_h,
+                    scale_w,
+                    align_corners,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1739,7 +1927,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
             {
                 return Ok(None);
             }
@@ -1802,6 +1993,28 @@ pub mod tensor {
                     &dst,
                     output.elem_count(),
                 )?,
+                (KernelDType::F8E4M3, KernelDType::U32) => crate::hip::index_select_u32_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
+                (KernelDType::F8E4M3, KernelDType::I64) => crate::hip::index_select_i64_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    dim,
+                    n_ids,
+                    &dst,
+                    output.elem_count(),
+                )?,
                 _ => return Ok(None),
             }
             Ok(Some(dst))
@@ -1825,8 +2038,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
-                || op.rhs.dtype() != KernelDType::U32
+            if !matches!(
+                op.lhs.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) || op.rhs.dtype() != KernelDType::U32
                 || output.dtype() != op.lhs.dtype()
                 || src_layout.dims().len() != ids_layout.dims().len()
                 || dim >= src_layout.dims().len()
@@ -1857,6 +2072,14 @@ pub mod tensor {
                     dim,
                     &dst,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::gather_u32_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout,
+                    op.rhs.buffer(),
+                    ids_layout,
+                    dim,
+                    &dst,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -1878,8 +2101,10 @@ pub mod tensor {
         }
         #[cfg(hip_runtime)]
         {
-            if !matches!(op.dst.dtype(), KernelDType::F32 | KernelDType::BF16)
-                || op.second.dtype() != KernelDType::U32
+            if !matches!(
+                op.dst.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) || op.second.dtype() != KernelDType::U32
                 || op.third.dtype() != op.dst.dtype()
                 || dst_layout.dims().len() != ids_layout.dims().len()
                 || ids_layout.dims().len() != src_layout.dims().len()
@@ -1919,6 +2144,16 @@ pub mod tensor {
                     src_layout,
                     dim,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::scatter_u32_f8e4m3(
+                    add,
+                    op.dst.buffer(),
+                    dst_layout,
+                    op.second.buffer(),
+                    ids_layout,
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                )?,
                 _ => unreachable!(),
             }
             Ok(true)
@@ -1942,8 +2177,10 @@ pub mod tensor {
             let Some(output) = op.output else {
                 return Ok(None);
             };
-            if !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
-                || op.second.dtype() != KernelDType::U32
+            if !matches!(
+                op.first.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            ) || op.second.dtype() != KernelDType::U32
                 || op.third.dtype() != op.first.dtype()
                 || output.dtype() != op.first.dtype()
                 || ids_layout.dims().len() != 1
@@ -1996,6 +2233,18 @@ pub mod tensor {
                     dim,
                     &dst,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::index_add_u32_f8e4m3(
+                    op.first.buffer(),
+                    input_layout,
+                    op.second.buffer(),
+                    ids_layout.start_offset(),
+                    ids_layout.stride()[0],
+                    ids_layout.dims()[0],
+                    op.third.buffer(),
+                    src_layout,
+                    dim,
+                    &dst,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -2024,7 +2273,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
             {
                 return Ok(None);
             }
@@ -2081,6 +2333,20 @@ pub mod tensor {
                     rhs_row_stride,
                     rhs_col_stride,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::matmul_f8e4m3(
+                    op.lhs.buffer(),
+                    op.rhs.buffer(),
+                    &dst,
+                    bmnk,
+                    lhs_layout.start_offset(),
+                    rhs_layout.start_offset(),
+                    lhs_batch_stride,
+                    rhs_batch_stride,
+                    lhs_row_stride,
+                    lhs_col_stride,
+                    rhs_row_stride,
+                    rhs_col_stride,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -2102,7 +2368,10 @@ pub mod tensor {
                 return Ok(None);
             };
             if op.input.dtype() != output.dtype()
-                || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.input.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || !is_contiguous(layout)
                 || layout.dims().is_empty()
             {
@@ -2123,6 +2392,13 @@ pub mod tensor {
                     cols,
                 )?,
                 KernelDType::BF16 => crate::hip::softmax_last_dim_bf16(
+                    op.input.buffer(),
+                    layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                )?,
+                KernelDType::F8E4M3 => crate::hip::softmax_last_dim_f8e4m3(
                     op.input.buffer(),
                     layout.start_offset(),
                     &dst,
@@ -2154,7 +2430,10 @@ pub mod tensor {
             };
             if op.lhs.dtype() != op.rhs.dtype()
                 || op.lhs.dtype() != output.dtype()
-                || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.lhs.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || !is_contiguous(src_layout)
                 || !is_contiguous(alpha_layout)
                 || src_layout.dims().is_empty()
@@ -2191,6 +2470,16 @@ pub mod tensor {
                     cols,
                     eps,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::rms_norm_f8e4m3(
+                    op.lhs.buffer(),
+                    src_layout.start_offset(),
+                    op.rhs.buffer(),
+                    alpha_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -2217,7 +2506,10 @@ pub mod tensor {
             if op.first.dtype() != op.second.dtype()
                 || op.first.dtype() != op.third.dtype()
                 || op.first.dtype() != output.dtype()
-                || !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.first.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || !is_contiguous(src_layout)
                 || !is_contiguous(alpha_layout)
                 || !is_contiguous(beta_layout)
@@ -2259,6 +2551,18 @@ pub mod tensor {
                     cols,
                     eps,
                 )?,
+                KernelDType::F8E4M3 => crate::hip::layer_norm_f8e4m3(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    alpha_layout.start_offset(),
+                    op.third.buffer(),
+                    beta_layout.start_offset(),
+                    &dst,
+                    rows,
+                    cols,
+                    eps,
+                )?,
                 _ => unreachable!(),
             }
             Ok(Some(dst))
@@ -2286,7 +2590,10 @@ pub mod tensor {
             if op.first.dtype() != op.second.dtype()
                 || op.first.dtype() != op.third.dtype()
                 || op.first.dtype() != output.dtype()
-                || !matches!(op.first.dtype(), KernelDType::F32 | KernelDType::BF16)
+                || !matches!(
+                    op.first.dtype(),
+                    KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+                )
                 || src_layout.dims().len() != 4
                 || !is_contiguous(src_layout)
                 || !is_contiguous(cos_layout)
@@ -2323,6 +2630,22 @@ pub mod tensor {
                     thd,
                 )?,
                 KernelDType::BF16 => crate::hip::rope_bf16(
+                    op.first.buffer(),
+                    src_layout.start_offset(),
+                    op.second.buffer(),
+                    cos_layout.start_offset(),
+                    op.third.buffer(),
+                    sin_layout.start_offset(),
+                    &dst,
+                    b,
+                    h,
+                    t,
+                    d,
+                    interleaved,
+                    unbatched_rope,
+                    thd,
+                )?,
+                KernelDType::F8E4M3 => crate::hip::rope_f8e4m3(
                     op.first.buffer(),
                     src_layout.start_offset(),
                     op.second.buffer(),
@@ -2407,7 +2730,10 @@ pub mod tensor {
             return Ok(None);
         };
         if op.input.dtype() != output.dtype()
-            || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+            || !matches!(
+                op.input.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            )
         {
             return Ok(None);
         }
@@ -2422,6 +2748,7 @@ pub mod tensor {
         match op.input.dtype() {
             KernelDType::F32 => crate::hip::unary_f32(code, op.input.buffer(), layout, &dst)?,
             KernelDType::BF16 => crate::hip::unary_bf16(code, op.input.buffer(), layout, &dst)?,
+            KernelDType::F8E4M3 => crate::hip::unary_f8e4m3(code, op.input.buffer(), layout, &dst)?,
             _ => unreachable!(),
         }
         Ok(Some(dst))
@@ -2443,7 +2770,10 @@ pub mod tensor {
         };
         if op.lhs.dtype() != op.rhs.dtype()
             || op.lhs.dtype() != output.dtype()
-            || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+            || !matches!(
+                op.lhs.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            )
         {
             return Ok(None);
         }
@@ -2475,6 +2805,14 @@ pub mod tensor {
                 rhs_layout,
                 &dst,
             )?,
+            KernelDType::F8E4M3 => crate::hip::binary_f8e4m3(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
             _ => unreachable!(),
         }
         Ok(Some(dst))
@@ -2495,7 +2833,10 @@ pub mod tensor {
             return Ok(None);
         };
         if op.lhs.dtype() != op.rhs.dtype()
-            || !matches!(op.lhs.dtype(), KernelDType::F32 | KernelDType::BF16)
+            || !matches!(
+                op.lhs.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            )
             || output.dtype() != KernelDType::U8
         {
             return Ok(None);
@@ -2521,6 +2862,14 @@ pub mod tensor {
                 &dst,
             )?,
             KernelDType::BF16 => crate::hip::cmp_bf16(
+                code,
+                op.lhs.buffer(),
+                lhs_layout,
+                op.rhs.buffer(),
+                rhs_layout,
+                &dst,
+            )?,
+            KernelDType::F8E4M3 => crate::hip::cmp_f8e4m3(
                 code,
                 op.lhs.buffer(),
                 lhs_layout,
@@ -2626,6 +2975,9 @@ pub mod tensor {
                 KernelScalar::BF16(value) => {
                     crate::hip::const_set_bf16(op.dst.buffer(), layout, value)?;
                 }
+                KernelScalar::F8E4M3(value) => {
+                    crate::hip::const_set_f8e4m3(op.dst.buffer(), layout, value)?;
+                }
             }
             Ok(())
         }
@@ -2655,6 +3007,7 @@ pub mod tensor {
                     op.dst.buffer().write_all(&u32s_to_bytes(&values))
                 }
                 KernelScalar::BF16(_) => Err(RocmError::NotImplemented("const_set bf16 host")),
+                KernelScalar::F8E4M3(_) => Err(RocmError::NotImplemented("const_set f8e4m3 host")),
             }
         }
     }
@@ -2848,7 +3201,10 @@ pub mod tensor {
             return Ok(None);
         };
         if op.input.dtype() != output.dtype()
-            || !matches!(op.input.dtype(), KernelDType::F32 | KernelDType::BF16)
+            || !matches!(
+                op.input.dtype(),
+                KernelDType::F32 | KernelDType::BF16 | KernelDType::F8E4M3
+            )
             || output.elem_count() != layout.elem_count()
         {
             return Ok(None);

@@ -136,3 +136,47 @@ extern "C" int hip_cmp_bf16(
         dst,
         elem_count);
 }
+
+extern "C" int hip_cmp_f8e4m3(
+    int ordinal,
+    int op,
+    const uint8_t* lhs,
+    const size_t* lhs_dims,
+    const size_t* lhs_strides,
+    size_t lhs_rank,
+    size_t lhs_start_offset,
+    const uint8_t* rhs,
+    const size_t* rhs_dims,
+    const size_t* rhs_strides,
+    size_t rhs_rank,
+    size_t rhs_start_offset,
+    uint8_t* dst,
+    size_t elem_count) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    DeviceLayout lhs_layout;
+    rc = lhs_layout.init(lhs_dims, lhs_strides, lhs_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    DeviceLayout rhs_layout;
+    rc = rhs_layout.init(rhs_dims, rhs_strides, rhs_rank);
+    if (rc != 0) {
+        return rc;
+    }
+    return launch_1d(
+        "cmp_f8e4m3",
+        elem_count,
+        cmp_kernel<F8E4M3Storage>,
+        op,
+        as_f8e4m3(lhs),
+        lhs_layout,
+        lhs_start_offset,
+        as_f8e4m3(rhs),
+        rhs_layout,
+        rhs_start_offset,
+        dst,
+        elem_count);
+}
