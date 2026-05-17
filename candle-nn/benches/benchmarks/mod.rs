@@ -29,6 +29,15 @@ impl BenchDevice for Device {
                 #[cfg(not(feature = "metal"))]
                 panic!("Metal device without metal feature enabled: {device:?}")
             }
+            Device::Rocm(device) => {
+                #[cfg(feature = "rocm")]
+                {
+                    use candle::backend::BackendDevice;
+                    return Ok(device.synchronize()?);
+                }
+                #[cfg(not(feature = "rocm"))]
+                panic!("ROCm device without rocm feature enabled: {device:?}")
+            }
         }
     }
 
@@ -46,6 +55,7 @@ impl BenchDevice for Device {
             }
             Device::Cuda(_) => format!("cuda_{}", name.into()),
             Device::Metal(_) => format!("metal_{}", name.into()),
+            Device::Rocm(_) => format!("rocm_{}", name.into()),
         }
     }
 }
@@ -61,6 +71,8 @@ impl BenchDeviceHandler {
             devices.push(Device::new_metal(0)?);
         } else if cfg!(feature = "cuda") {
             devices.push(Device::new_cuda(0)?);
+        } else if cfg!(feature = "rocm") {
+            devices.push(Device::new_rocm(0)?);
         } else {
             devices.push(Device::Cpu);
         }
