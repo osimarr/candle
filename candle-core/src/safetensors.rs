@@ -274,8 +274,20 @@ impl Tensor {
                     Device::Metal(_) => {
                         return Err(Error::Msg("Metal support not compiled".to_string()));
                     }
+                    #[cfg(feature = "rocm")]
+                    Device::Rocm(device) => {
+                        let storage = crate::RocmStorage::from_raw_bytes(
+                            device,
+                            dtype,
+                            shape.iter().product(),
+                            data,
+                            "rocm safetensors load",
+                        )?;
+                        Storage::Rocm(storage)
+                    }
+                    #[cfg(not(feature = "rocm"))]
                     Device::Rocm(_) => {
-                        return Err(Error::UnsupportedDTypeForOp(dtype, "rocm safetensors load"));
+                        return Err(Error::NotCompiledWithRocmSupport);
                     }
                 };
 
@@ -373,8 +385,20 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
         Device::Metal(_) => {
             return Err(Error::Msg("Metal support not compiled".to_string()));
         }
+        #[cfg(feature = "rocm")]
+        Device::Rocm(device) => {
+            let storage = crate::RocmStorage::from_raw_bytes(
+                device,
+                dtype,
+                shape.iter().product(),
+                data,
+                "rocm safetensors load",
+            )?;
+            Storage::Rocm(storage)
+        }
+        #[cfg(not(feature = "rocm"))]
         Device::Rocm(_) => {
-            return Err(Error::UnsupportedDTypeForOp(dtype, "rocm safetensors load"));
+            return Err(Error::NotCompiledWithRocmSupport);
         }
     };
 

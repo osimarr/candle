@@ -2,9 +2,12 @@
 //!
 //! This backend advertises itself as ROCm to Candle while storing data in CPU
 //! memory and dispatching operations through the CPU backend. It is intended as
-//! a bring-up shim and intentionally supports `f32` tensors only.
+//! a bring-up shim: storage/data movement supports all Candle dtypes, while
+//! native arithmetic kernels are intentionally limited to `f32`.
 
 use candle_rocm_kernels as kernels;
+use float8::F8E4M3;
+use half::{bf16, f16};
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
@@ -70,6 +73,26 @@ impl RocmStorage {
         Self::from_buffer(buffer, device, dtype, elem_count, "from_cpu_storage_owned")
     }
 
+    #[cfg(feature = "rocm")]
+    pub(crate) fn from_raw_bytes(
+        device: &RocmDevice,
+        dtype: DType,
+        elem_count: usize,
+        bytes: &[u8],
+        op: &'static str,
+    ) -> Result<Self> {
+        ensure_supported_storage_dtype(dtype, op)?;
+        let expected = storage_size_in_bytes(dtype, elem_count)?;
+        if bytes.len() != expected {
+            crate::bail!(
+                "invalid ROCm raw buffer size for {op}: expected {expected} bytes, got {}",
+                bytes.len()
+            )
+        }
+        let buffer = device.inner.copy_from_host(bytes)?;
+        Self::from_buffer(buffer, device.clone(), dtype, elem_count, op)
+    }
+
     fn from_buffer(
         buffer: kernels::Buffer,
         device: RocmDevice,
@@ -78,7 +101,7 @@ impl RocmStorage {
         op: &'static str,
     ) -> Result<Self> {
         ensure_supported_storage_dtype(dtype, op)?;
-        let expected = elem_count * dtype.size_in_bytes();
+        let expected = storage_size_in_bytes(dtype, elem_count)?;
         if buffer.size_in_bytes() != expected {
             crate::bail!(
                 "invalid ROCm buffer size for {op}: expected {expected} bytes, got {}",
@@ -94,7 +117,8 @@ impl RocmStorage {
     }
 
     fn size_in_bytes(&self) -> usize {
-        self.elem_count * self.dtype.size_in_bytes()
+        storage_size_in_bytes(self.dtype, self.elem_count)
+            .unwrap_or_else(|_| self.buffer.size_in_bytes())
     }
 
     fn to_host_bytes(&self) -> Result<Vec<u8>> {
@@ -325,11 +349,9 @@ fn ensure_f32(dtype: DType, op: &'static str) -> Result<()> {
     }
 }
 
-fn ensure_supported_storage_dtype(dtype: DType, op: &'static str) -> Result<()> {
-    match dtype {
-        DType::F32 | DType::U8 | DType::U32 => Ok(()),
-        dtype => Err(Error::UnsupportedDTypeForOp(dtype, op).bt()),
-    }
+fn ensure_supported_storage_dtype(dtype: DType, _op: &'static str) -> Result<()> {
+    let _ = kernel_dtype(dtype)?;
+    Ok(())
 }
 
 fn kernel_dtype(dtype: DType) -> Result<kernels::KernelDType> {
@@ -354,6 +376,10 @@ fn kernel_dtype(dtype: DType) -> Result<kernels::KernelDType> {
 
 fn kernel_output(dtype: DType, elem_count: usize) -> Result<kernels::TensorOutput> {
     Ok(kernels::TensorOutput::new(kernel_dtype(dtype)?, elem_count))
+}
+
+fn storage_size_in_bytes(dtype: DType, elem_count: usize) -> Result<usize> {
+    Ok(kernel_dtype(dtype)?.storage_size_in_bytes(elem_count))
 }
 
 fn kernel_output_for_layout(layout: &Layout, dtype: DType) -> Result<kernels::TensorOutput> {
@@ -410,12 +436,27 @@ fn vec_from_bytes<T>(bytes: &[u8], elem_count: usize, dtype: DType) -> Result<Ve
     Ok(data)
 }
 
+fn check_raw_storage_bytes(dtype: DType, elem_count: usize, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    let expected = storage_size_in_bytes(dtype, elem_count)?;
+    if bytes.len() != expected {
+        crate::bail!(
+            "invalid ROCm buffer size for {dtype:?}: expected {expected} bytes, got {}",
+            bytes.len()
+        )
+    }
+    Ok(bytes)
+}
+
+fn packed_elem_count(dtype: DType, byte_count: usize) -> usize {
+    match dtype {
+        DType::F6E2M3 | DType::F6E3M2 => byte_count * 8 / 6,
+        DType::F4 => byte_count * 2,
+        _ => byte_count,
+    }
+}
+
 fn cpu_storage_into_bytes(storage: CpuStorage) -> Result<(DType, usize, Vec<u8>)> {
     match storage {
-        CpuStorage::F32(data) => {
-            let elem_count = data.len();
-            Ok((DType::F32, elem_count, slice_to_bytes(&data)))
-        }
         CpuStorage::U8(data) => {
             let elem_count = data.len();
             Ok((DType::U8, elem_count, data))
@@ -424,7 +465,54 @@ fn cpu_storage_into_bytes(storage: CpuStorage) -> Result<(DType, usize, Vec<u8>)
             let elem_count = data.len();
             Ok((DType::U32, elem_count, slice_to_bytes(&data)))
         }
-        storage => Err(Error::UnsupportedDTypeForOp(storage.dtype(), "rocm storage").bt()),
+        CpuStorage::I16(data) => {
+            let elem_count = data.len();
+            Ok((DType::I16, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::I32(data) => {
+            let elem_count = data.len();
+            Ok((DType::I32, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::I64(data) => {
+            let elem_count = data.len();
+            Ok((DType::I64, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::BF16(data) => {
+            let elem_count = data.len();
+            Ok((DType::BF16, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::F16(data) => {
+            let elem_count = data.len();
+            Ok((DType::F16, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::F32(data) => {
+            let elem_count = data.len();
+            Ok((DType::F32, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::F64(data) => {
+            let elem_count = data.len();
+            Ok((DType::F64, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::F8E4M3(data) => {
+            let elem_count = data.len();
+            Ok((DType::F8E4M3, elem_count, slice_to_bytes(&data)))
+        }
+        CpuStorage::F6E2M3(data) => {
+            let elem_count = packed_elem_count(DType::F6E2M3, data.len());
+            Ok((DType::F6E2M3, elem_count, data))
+        }
+        CpuStorage::F6E3M2(data) => {
+            let elem_count = packed_elem_count(DType::F6E3M2, data.len());
+            Ok((DType::F6E3M2, elem_count, data))
+        }
+        CpuStorage::F4(data) => {
+            let elem_count = packed_elem_count(DType::F4, data.len());
+            Ok((DType::F4, elem_count, data))
+        }
+        CpuStorage::F8E8M0(data) => {
+            let elem_count = data.len();
+            Ok((DType::F8E8M0, elem_count, data))
+        }
     }
 }
 
@@ -449,9 +537,6 @@ fn cpu_storage_meta(storage: &CpuStorage) -> (DType, usize) {
 
 fn cpu_storage_from_bytes(dtype: DType, elem_count: usize, bytes: Vec<u8>) -> Result<CpuStorage> {
     match dtype {
-        DType::F32 => Ok(CpuStorage::F32(vec_from_bytes::<f32>(
-            &bytes, elem_count, dtype,
-        )?)),
         DType::U8 => {
             if bytes.len() != elem_count {
                 crate::bail!(
@@ -464,7 +549,42 @@ fn cpu_storage_from_bytes(dtype: DType, elem_count: usize, bytes: Vec<u8>) -> Re
         DType::U32 => Ok(CpuStorage::U32(vec_from_bytes::<u32>(
             &bytes, elem_count, dtype,
         )?)),
-        dtype => Err(Error::UnsupportedDTypeForOp(dtype, "rocm storage").bt()),
+        DType::I16 => Ok(CpuStorage::I16(vec_from_bytes::<i16>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::I32 => Ok(CpuStorage::I32(vec_from_bytes::<i32>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::I64 => Ok(CpuStorage::I64(vec_from_bytes::<i64>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::BF16 => Ok(CpuStorage::BF16(vec_from_bytes::<bf16>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::F16 => Ok(CpuStorage::F16(vec_from_bytes::<f16>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::F32 => Ok(CpuStorage::F32(vec_from_bytes::<f32>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::F64 => Ok(CpuStorage::F64(vec_from_bytes::<f64>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::F8E4M3 => Ok(CpuStorage::F8E4M3(vec_from_bytes::<F8E4M3>(
+            &bytes, elem_count, dtype,
+        )?)),
+        DType::F6E2M3 => Ok(CpuStorage::F6E2M3(check_raw_storage_bytes(
+            dtype, elem_count, bytes,
+        )?)),
+        DType::F6E3M2 => Ok(CpuStorage::F6E3M2(check_raw_storage_bytes(
+            dtype, elem_count, bytes,
+        )?)),
+        DType::F4 => Ok(CpuStorage::F4(check_raw_storage_bytes(
+            dtype, elem_count, bytes,
+        )?)),
+        DType::F8E8M0 => Ok(CpuStorage::F8E8M0(check_raw_storage_bytes(
+            dtype, elem_count, bytes,
+        )?)),
     }
 }
 
@@ -564,13 +684,12 @@ impl BackendStorage for RocmStorage {
     }
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
-        ensure_f32(dtype, "to_dtype")?;
         let op = self.op1("to_dtype", Some(kernel_output_for_layout(layout, dtype)?))?;
         let storage = kernels::tensor::call_to_dtype(op, || {
             let storage = self.to_cpu_storage_impl()?;
             storage.to_dtype(layout, dtype)
         })?;
-        Self::wrap_f32(storage, self.device.clone(), "to_dtype")
+        Self::wrap(storage, self.device.clone(), "to_dtype")
     }
 
     fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
@@ -973,7 +1092,7 @@ impl BackendDevice for RocmDevice {
     }
 
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
-        ensure_f32(dtype, "zeros")?;
+        ensure_supported_storage_dtype(dtype, "zeros")?;
         let op = kernels::device::AllocOp {
             name: "zeros",
             device: self.kernel_device(),
@@ -1118,7 +1237,23 @@ impl BackendDevice for RocmDevice {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DType, Device, Tensor};
+    use crate::{CpuStorage, DType, Device, Storage, Tensor, WithDType};
+
+    fn assert_rocm_round_trip<T>(device: &Device, data: &[T]) -> crate::Result<()>
+    where
+        T: WithDType + std::fmt::Debug + PartialEq,
+    {
+        let tensor = Tensor::from_slice(data, data.len(), device)?;
+        assert!(tensor.device().is_rocm());
+        assert_eq!(tensor.dtype(), T::DTYPE);
+        assert_eq!(tensor.to_vec1::<T>()?, data);
+
+        let cpu = tensor.to_device(&Device::Cpu)?;
+        assert!(cpu.device().is_cpu());
+        assert_eq!(cpu.dtype(), T::DTYPE);
+        assert_eq!(cpu.to_vec1::<T>()?, data);
+        Ok(())
+    }
 
     #[test]
     fn dummy_rocm_runs_f32_ops_on_cpu_storage() -> crate::Result<()> {
@@ -1137,11 +1272,51 @@ mod tests {
     }
 
     #[test]
-    fn dummy_rocm_rejects_non_f32_tensors() -> crate::Result<()> {
+    fn dummy_rocm_round_trips_non_f32_storage_dtypes() -> crate::Result<()> {
         let device = Device::new_rocm(0)?;
-        assert!(Tensor::zeros((2,), DType::F64, &device).is_err());
-        assert!(Tensor::zeros((2,), DType::U32, &device).is_err());
-        assert!(Tensor::zeros((2,), DType::F32, &device).is_ok());
+        assert_rocm_round_trip(&device, &[1u8, 2, 3])?;
+        assert_rocm_round_trip(&device, &[1u32, 2, 3])?;
+        assert_rocm_round_trip(&device, &[-1i16, 2, 3])?;
+        assert_rocm_round_trip(&device, &[-1i32, 2, 3])?;
+        assert_rocm_round_trip(&device, &[-1i64, 2, 3])?;
+        assert_rocm_round_trip(
+            &device,
+            &[half::bf16::from_f32(1.25), half::bf16::from_f32(-2.5)],
+        )?;
+        assert_rocm_round_trip(
+            &device,
+            &[half::f16::from_f32(1.25), half::f16::from_f32(-2.5)],
+        )?;
+        assert_rocm_round_trip(&device, &[1f32, -2.5, 3.25])?;
+        assert_rocm_round_trip(&device, &[1f64, -2.5, 3.25])?;
+        assert_rocm_round_trip(
+            &device,
+            &[
+                float8::F8E4M3::from_f64(1.0),
+                float8::F8E4M3::from_f64(-2.0),
+            ],
+        )?;
+        assert!(Tensor::zeros((3,), DType::BF16, &device).is_ok());
+        assert!(Tensor::zeros((3,), DType::F64, &device).is_ok());
+        assert!(Tensor::zeros((3,), DType::F4, &device).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn dummy_rocm_preserves_raw_packed_safetensor_dtypes() -> crate::Result<()> {
+        let device = Device::new_rocm(0)?;
+        let raw = [0b1010_0101, 0b0000_0111];
+        let tensor = Tensor::from_raw_buffer(&raw, DType::F4, &[3], &device)?;
+
+        assert!(tensor.device().is_rocm());
+        assert_eq!(tensor.dtype(), DType::F4);
+
+        let cpu = tensor.to_device(&Device::Cpu)?;
+        let storage = cpu.storage();
+        match &*storage {
+            Storage::Cpu(CpuStorage::F4(bytes)) => assert_eq!(bytes, &raw),
+            storage => panic!("expected CPU F4 storage, got {storage:?}"),
+        }
         Ok(())
     }
 
