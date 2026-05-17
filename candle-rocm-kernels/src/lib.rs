@@ -1,9 +1,9 @@
 //! ROCm kernel dispatch surface for Candle.
 //!
 //! `candle-core` calls into this crate with typed ROCm operation descriptors
-//! first. When compiled with HIP support, supported f32, bf16, and fp8 operation
-//! slices launch HIP kernels behind these entry points; unsupported operations
-//! still use fallback closures while coverage is expanded.
+//! first. When compiled with HIP support, supported f32, f16, bf16, and fp8
+//! operation slices launch HIP kernels behind these entry points; unsupported
+//! operations still use fallback closures while coverage is expanded.
 
 mod allocator;
 mod buffer;
@@ -555,6 +555,10 @@ pub mod quantized {
         cfg!(hip_runtime)
     }
 
+    pub fn supports_native_f16() -> bool {
+        cfg!(hip_runtime)
+    }
+
     pub fn try_quantize_bf16(src: &TensorArg, dst: &Buffer) -> crate::Result<bool> {
         #[cfg(not(hip_runtime))]
         {
@@ -585,6 +589,36 @@ pub mod quantized {
         }
     }
 
+    pub fn try_quantize_f16(src: &TensorArg, dst: &Buffer) -> crate::Result<bool> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (src, dst);
+            Ok(false)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if dst.size_in_bytes() != KernelDType::F16.storage_size_in_bytes(src.elem_count()) {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: dst.size_in_bytes(),
+                    offset: 0,
+                    requested: KernelDType::F16.storage_size_in_bytes(src.elem_count()),
+                });
+            }
+            match src.dtype() {
+                KernelDType::F32 => {
+                    let layout = LayoutArg::new(vec![src.elem_count()], vec![1], 0)?;
+                    crate::hip::cast_f32_to_f16(src.buffer(), &layout, dst)?;
+                    Ok(true)
+                }
+                KernelDType::F16 => {
+                    crate::hip::copy_d2d(src.buffer(), dst, dst.size_in_bytes())?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+    }
+
     pub fn try_dequantize_bf16_to_f32(
         device: &Device,
         src: &Buffer,
@@ -607,6 +641,32 @@ pub mod quantized {
             let dst = device.allocate(KernelDType::F32.storage_size_in_bytes(elem_count))?;
             let layout = LayoutArg::new(vec![elem_count], vec![1], 0)?;
             crate::hip::cast_bf16_to_f32(src, &layout, &dst)?;
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_dequantize_f16_to_f32(
+        device: &Device,
+        src: &Buffer,
+        elem_count: usize,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (device, src, elem_count);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if src.size_in_bytes() != KernelDType::F16.storage_size_in_bytes(elem_count) {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: src.size_in_bytes(),
+                    offset: 0,
+                    requested: KernelDType::F16.storage_size_in_bytes(elem_count),
+                });
+            }
+            let dst = device.allocate(KernelDType::F32.storage_size_in_bytes(elem_count))?;
+            let layout = LayoutArg::new(vec![elem_count], vec![1], 0)?;
+            crate::hip::cast_f16_to_f32(src, &layout, &dst)?;
             Ok(Some(dst))
         }
     }
@@ -982,6 +1042,8 @@ pub mod tensor {
                 (op.input.dtype(), output.dtype()),
                 (KernelDType::F32, KernelDType::BF16)
                     | (KernelDType::BF16, KernelDType::F32)
+                    | (KernelDType::F32, KernelDType::F16)
+                    | (KernelDType::F16, KernelDType::F32)
                     | (KernelDType::F32, KernelDType::F8E4M3)
                     | (KernelDType::F8E4M3, KernelDType::F32)
                     | (KernelDType::BF16, KernelDType::F8E4M3)
@@ -1001,6 +1063,12 @@ pub mod tensor {
                 }
                 (KernelDType::BF16, KernelDType::F32) => {
                     crate::hip::cast_bf16_to_f32(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::F32, KernelDType::F16) => {
+                    crate::hip::cast_f32_to_f16(op.input.buffer(), layout, &dst)?
+                }
+                (KernelDType::F16, KernelDType::F32) => {
+                    crate::hip::cast_f16_to_f32(op.input.buffer(), layout, &dst)?
                 }
                 (KernelDType::F32, KernelDType::F8E4M3) => {
                     crate::hip::cast_f32_to_f8e4m3(op.input.buffer(), layout, &dst)?

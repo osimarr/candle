@@ -1,0 +1,12 @@
+[package]
+name = "candle-rocm-kernels-all-ops-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+candle = { package = "candle-core", path = "../../../candle-core", features = ["rocm"] }
+candle-nn = { path = "../../../candle-nn", features = ["rocm"] }
+half = "2.5.0"

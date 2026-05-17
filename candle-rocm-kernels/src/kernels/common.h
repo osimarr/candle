@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -90,6 +91,26 @@ __device__ inline uint16_t f32_to_bf16_bits(float value) {
 
 __device__ inline float bf16_bits_to_f32(uint16_t value) {
     return __uint_as_float(static_cast<uint32_t>(value) << 16);
+}
+
+__device__ inline uint16_t f32_to_f16_bits(float value) {
+    union HalfBits {
+        __half half;
+        uint16_t bits;
+    };
+    HalfBits storage;
+    storage.half = __float2half(value);
+    return storage.bits;
+}
+
+__device__ inline float f16_bits_to_f32(uint16_t value) {
+    union HalfBits {
+        __half half;
+        uint16_t bits;
+    };
+    HalfBits storage;
+    storage.bits = value;
+    return __half2float(storage.half);
 }
 
 struct F8E4M3Storage {

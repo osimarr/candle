@@ -40,6 +40,26 @@ unsafe extern "C" {
         dst: *mut f32,
         elem_count: usize,
     ) -> c_int;
+    fn hip_cast_f32_to_f16(
+        ordinal: c_int,
+        src: *const f32,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        dst: *mut u16,
+        elem_count: usize,
+    ) -> c_int;
+    fn hip_cast_f16_to_f32(
+        ordinal: c_int,
+        src: *const u16,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        dst: *mut f32,
+        elem_count: usize,
+    ) -> c_int;
     fn hip_cast_f32_to_f8e4m3(
         ordinal: c_int,
         src: *const f32,
@@ -1589,6 +1609,42 @@ pub(crate) fn cast_bf16_to_f32(src: &Buffer, layout: &LayoutArg, dst: &Buffer) -
             )
         },
         "cast_bf16_to_f32",
+    )
+}
+
+pub(crate) fn cast_f32_to_f16(src: &Buffer, layout: &LayoutArg, dst: &Buffer) -> Result<()> {
+    check(
+        unsafe {
+            hip_cast_f32_to_f16(
+                ordinal_to_c_int(src.device_ordinal())?,
+                src.device_ptr().cast::<f32>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                dst.device_ptr().cast::<u16>(),
+                layout.elem_count(),
+            )
+        },
+        "cast_f32_to_f16",
+    )
+}
+
+pub(crate) fn cast_f16_to_f32(src: &Buffer, layout: &LayoutArg, dst: &Buffer) -> Result<()> {
+    check(
+        unsafe {
+            hip_cast_f16_to_f32(
+                ordinal_to_c_int(src.device_ordinal())?,
+                src.device_ptr().cast::<u16>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                dst.device_ptr().cast::<f32>(),
+                layout.elem_count(),
+            )
+        },
+        "cast_f16_to_f32",
     )
 }
 
