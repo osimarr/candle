@@ -1,5 +1,7 @@
 use crate::{allocator::AllocationHandle, KernelDType, Result, RocmError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(hip_runtime))]
+use std::sync::Mutex;
 
 #[derive(Clone)]
 pub struct Buffer {
@@ -7,8 +9,15 @@ pub struct Buffer {
 }
 
 struct BufferInner {
+    storage: BufferStorage,
     allocation: AllocationHandle,
-    data: Mutex<Vec<u8>>,
+}
+
+enum BufferStorage {
+    #[cfg(hip_runtime)]
+    Hip(crate::hip::DeviceMemory),
+    #[cfg(not(hip_runtime))]
+    Host(Mutex<Vec<u8>>),
 }
 
 impl std::fmt::Debug for Buffer {
@@ -25,17 +34,28 @@ impl std::fmt::Debug for Buffer {
 impl Buffer {
     pub(crate) fn new(allocation: AllocationHandle, zeroed: bool) -> Result<Self> {
         let bytes = allocation.size_in_bytes();
-        let data = if zeroed {
-            vec![0; bytes]
-        } else {
-            // This is a host-backed placeholder until real HIP allocation lands.
-            // Keep it initialized so the shim remains safe.
-            vec![0; bytes]
+        #[cfg(hip_runtime)]
+        let storage = {
+            let memory = crate::hip::DeviceMemory::allocate(allocation.device_ordinal(), bytes)?;
+            if zeroed {
+                crate::hip::memset(&memory, 0)?;
+            }
+            BufferStorage::Hip(memory)
+        };
+        #[cfg(not(hip_runtime))]
+        let storage = {
+            let data = if zeroed {
+                vec![0; bytes]
+            } else {
+                // Keep the host fallback initialized so the shim remains safe.
+                vec![0; bytes]
+            };
+            BufferStorage::Host(Mutex::new(data))
         };
         Ok(Self {
             inner: Arc::new(BufferInner {
+                storage,
                 allocation,
-                data: Mutex::new(data),
             }),
         })
     }
@@ -60,6 +80,12 @@ impl Buffer {
         self.strong_count() == 1
     }
 
+    pub(crate) fn allocate_on_same_allocator(&self, bytes: usize, zeroed: bool) -> Result<Self> {
+        self.inner
+            .allocation
+            .allocate_on_same_allocator(bytes, zeroed)
+    }
+
     pub fn view(
         &self,
         byte_offset: usize,
@@ -80,24 +106,41 @@ impl Buffer {
 
     pub(crate) fn read_all(&self, dst: &mut [u8]) -> Result<()> {
         self.check_bounds(0, dst.len())?;
-        let data = self
-            .inner
-            .data
-            .lock()
-            .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
-        dst.copy_from_slice(&data[..dst.len()]);
-        Ok(())
+        match &self.inner.storage {
+            #[cfg(hip_runtime)]
+            BufferStorage::Hip(memory) => crate::hip::copy_d2h(memory, dst),
+            #[cfg(not(hip_runtime))]
+            BufferStorage::Host(data) => {
+                let data = data
+                    .lock()
+                    .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
+                dst.copy_from_slice(&data[..dst.len()]);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn write_all(&self, src: &[u8]) -> Result<()> {
         self.check_bounds(0, src.len())?;
-        let mut data = self
-            .inner
-            .data
-            .lock()
-            .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
-        data[..src.len()].copy_from_slice(src);
-        Ok(())
+        match &self.inner.storage {
+            #[cfg(hip_runtime)]
+            BufferStorage::Hip(memory) => crate::hip::copy_h2d(memory, src),
+            #[cfg(not(hip_runtime))]
+            BufferStorage::Host(data) => {
+                let mut data = data
+                    .lock()
+                    .map_err(|_| RocmError::MutexPoisoned("rocm buffer"))?;
+                data[..src.len()].copy_from_slice(src);
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(hip_runtime)]
+    pub(crate) fn device_ptr(&self) -> *mut std::os::raw::c_void {
+        match &self.inner.storage {
+            BufferStorage::Hip(memory) => memory.ptr(),
+        }
     }
 
     pub(crate) fn check_device(&self, device_ordinal: usize, op: &'static str) -> Result<()> {

@@ -17,6 +17,16 @@ struct DeviceInner {
 
 impl Device {
     pub fn new(ordinal: usize) -> Result<Self> {
+        #[cfg(hip_runtime)]
+        {
+            let count = crate::hip::device_count()?;
+            if ordinal >= count {
+                return Err(crate::RocmError::Runtime(format!(
+                    "requested ROCm device ordinal {ordinal}, but only {count} HIP device(s) are visible"
+                )));
+            }
+            crate::hip::set_device(ordinal)?;
+        }
         Ok(Self {
             inner: Arc::new(DeviceInner {
                 ordinal,
@@ -75,6 +85,8 @@ impl Device {
     }
 
     pub fn synchronize(&self) -> Result<()> {
+        #[cfg(hip_runtime)]
+        crate::hip::synchronize(self.ordinal())?;
         self.allocator().synchronize()
     }
 }

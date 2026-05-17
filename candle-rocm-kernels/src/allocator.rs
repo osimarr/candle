@@ -88,6 +88,16 @@ impl AllocationHandle {
     pub(crate) fn size_in_bytes(&self) -> usize {
         self.bytes
     }
+
+    pub(crate) fn allocate_on_same_allocator(&self, bytes: usize, zeroed: bool) -> Result<Buffer> {
+        let allocator = self
+            .allocator
+            .upgrade()
+            .ok_or_else(|| RocmError::Runtime("ROCm allocator was dropped".to_string()))?;
+        let id = allocator.next_buffer_id.fetch_add(1, Ordering::Relaxed);
+        let allocation = allocator.register_allocation(id, bytes)?;
+        Buffer::new(allocation, zeroed)
+    }
 }
 
 impl Drop for AllocationHandle {
