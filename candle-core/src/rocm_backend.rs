@@ -236,6 +236,40 @@ impl RocmStorage {
         Err(Error::UnsupportedDTypeForOp(self.dtype, "sigmoid").bt())
     }
 
+    pub fn repeat_penalty(
+        &self,
+        layout: &Layout,
+        token_ids: &Self,
+        token_ids_layout: &Layout,
+        penalty: f32,
+    ) -> Result<(Self, Shape)> {
+        let mut op = self.op2(
+            "repeat-penalty",
+            token_ids,
+            Some(kernel_output_for_layout(layout, DType::F32)?),
+        )?;
+        op.lhs_layout = Some(kernel_layout(layout)?);
+        op.rhs_layout = Some(kernel_layout(token_ids_layout)?);
+        if let Some(buffer) =
+            kernels::tensor::try_repeat_penalty(&op, penalty).map_err(Error::from)?
+        {
+            let storage = Self::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                layout.shape().elem_count(),
+                "repeat-penalty",
+            )?;
+            return Ok((storage, layout.shape().clone()));
+        }
+        let logits = self.to_cpu_storage_impl()?;
+        let token_ids = token_ids.to_cpu_storage_impl()?;
+        let storage =
+            repeat_penalty_cpu_storage(&logits, layout, &token_ids, token_ids_layout, penalty)?;
+        let storage = Self::wrap(storage, self.device.clone(), "repeat-penalty")?;
+        Ok((storage, layout.shape().clone()))
+    }
+
     pub fn rms_norm(
         &self,
         layout: &Layout,
@@ -891,6 +925,44 @@ fn cpu_storage_from_bytes(dtype: DType, elem_count: usize, bytes: Vec<u8>) -> Re
             dtype, elem_count, bytes,
         )?)),
     }
+}
+
+fn repeat_penalty_cpu_storage(
+    logits: &CpuStorage,
+    logits_layout: &Layout,
+    token_ids: &CpuStorage,
+    token_ids_layout: &Layout,
+    penalty: f32,
+) -> Result<CpuStorage> {
+    if logits_layout.dims().len() != 1 {
+        crate::bail!(
+            "repeat-penalty expects rank-1 logits, got {:?}",
+            logits_layout.shape()
+        )
+    }
+    if token_ids_layout.dims().len() != 1 {
+        crate::bail!(
+            "repeat-penalty expects rank-1 token ids, got {:?}",
+            token_ids_layout.shape()
+        )
+    }
+    let logits = logits.as_slice::<f32>()?;
+    let token_ids = token_ids.as_slice::<u32>()?;
+    let mut logits = logits_layout
+        .strided_index()
+        .map(|index| logits[index])
+        .collect::<Vec<_>>();
+    for token_id_index in token_ids_layout.strided_index() {
+        let token_id = token_ids[token_id_index] as usize;
+        if let Some(logit) = logits.get_mut(token_id) {
+            if *logit >= 0. {
+                *logit /= penalty
+            } else {
+                *logit *= penalty
+            }
+        }
+    }
+    Ok(CpuStorage::F32(logits))
 }
 
 impl BackendStorage for RocmStorage {

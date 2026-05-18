@@ -2657,6 +2657,54 @@ pub mod tensor {
         }
     }
 
+    pub fn try_repeat_penalty(op: &Op2, penalty: f32) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (op, penalty);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            let Some(logits_layout) = op.lhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(token_ids_layout) = op.rhs_layout.as_ref() else {
+                return Ok(None);
+            };
+            let Some(output) = op.output else {
+                return Ok(None);
+            };
+            if op.lhs.dtype() != KernelDType::F32
+                || op.rhs.dtype() != KernelDType::U32
+                || output.dtype() != KernelDType::F32
+                || logits_layout.dims().len() != 1
+                || token_ids_layout.dims().len() != 1
+                || output.elem_count() != logits_layout.elem_count()
+            {
+                return Ok(None);
+            }
+            check_layout(&op.lhs, logits_layout)?;
+            check_layout(&op.rhs, token_ids_layout)?;
+            let dst = op.lhs.buffer().allocate_on_same_allocator(
+                output.dtype().storage_size_in_bytes(output.elem_count()),
+                false,
+            )?;
+            crate::hip::repeat_penalty_f32(
+                op.lhs.buffer(),
+                logits_layout.start_offset(),
+                logits_layout.stride()[0],
+                op.rhs.buffer(),
+                token_ids_layout.start_offset(),
+                token_ids_layout.stride()[0],
+                &dst,
+                output.elem_count(),
+                token_ids_layout.elem_count(),
+                penalty,
+            )?;
+            Ok(Some(dst))
+        }
+    }
+
     pub fn try_rms_norm(op: &Op2, eps: f32) -> crate::Result<Option<Buffer>> {
         #[cfg(not(hip_runtime))]
         {

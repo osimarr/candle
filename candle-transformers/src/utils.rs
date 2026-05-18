@@ -1,6 +1,6 @@
 //! Shared utilities: repeat_kv, repeat_penalty, causal mask.
 
-use candle::{Device, Result, Tensor};
+use candle::{CpuStorage, Device, Layout, Result, Shape, Tensor};
 
 /// Build a causal attention mask of shape `(seq_len, kv_len)` where
 /// `kv_len = index_pos + seq_len`.
@@ -23,15 +23,22 @@ pub fn build_causal_mask(seq_len: usize, index_pos: usize, device: &Device) -> R
 }
 
 pub fn apply_repeat_penalty(logits: &Tensor, penalty: f32, context: &[u32]) -> Result<Tensor> {
+    let token_ids = unique_token_ids(context);
+    #[cfg(feature = "rocm")]
+    if logits.device().is_rocm() {
+        let logits = logits.to_dtype(candle::DType::F32)?;
+        if token_ids.is_empty() {
+            return Ok(logits);
+        }
+        let token_ids_len = token_ids.len();
+        let token_ids = Tensor::from_vec(token_ids, token_ids_len, logits.device())?;
+        return logits.apply_op2_no_bwd(&token_ids, &RepeatPenalty { penalty });
+    }
+
     let device = logits.device();
     let mut logits = logits.to_dtype(candle::DType::F32)?.to_vec1::<f32>()?;
-    let mut already_seen = std::collections::HashSet::new();
-    for token_id in context {
-        if already_seen.contains(token_id) {
-            continue;
-        }
-        already_seen.insert(token_id);
-        if let Some(logit) = logits.get_mut(*token_id as usize) {
+    for token_id in token_ids {
+        if let Some(logit) = logits.get_mut(token_id as usize) {
             if *logit >= 0. {
                 *logit /= penalty
             } else {
@@ -41,6 +48,75 @@ pub fn apply_repeat_penalty(logits: &Tensor, penalty: f32, context: &[u32]) -> R
     }
     let logits_len = logits.len();
     Tensor::from_vec(logits, logits_len, device)
+}
+
+fn unique_token_ids(context: &[u32]) -> Vec<u32> {
+    let mut already_seen = std::collections::HashSet::new();
+    context
+        .iter()
+        .copied()
+        .filter(|token_id| already_seen.insert(*token_id))
+        .collect()
+}
+
+struct RepeatPenalty {
+    penalty: f32,
+}
+
+impl candle::CustomOp2 for RepeatPenalty {
+    fn name(&self) -> &'static str {
+        "repeat-penalty"
+    }
+
+    fn cpu_fwd(
+        &self,
+        logits: &CpuStorage,
+        logits_layout: &Layout,
+        token_ids: &CpuStorage,
+        token_ids_layout: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        if logits_layout.dims().len() != 1 {
+            candle::bail!(
+                "repeat-penalty expects rank-1 logits, got {:?}",
+                logits_layout.shape()
+            )
+        }
+        if token_ids_layout.dims().len() != 1 {
+            candle::bail!(
+                "repeat-penalty expects rank-1 token ids, got {:?}",
+                token_ids_layout.shape()
+            )
+        }
+        let logits = logits.as_slice::<f32>()?;
+        let token_ids = token_ids.as_slice::<u32>()?;
+        let mut logits = (0..logits_layout.shape().elem_count())
+            .map(|index| logits[logits_layout.start_offset() + index * logits_layout.stride()[0]])
+            .collect::<Vec<_>>();
+        for token_id_index in 0..token_ids_layout.shape().elem_count() {
+            let token_id = token_ids
+                [token_ids_layout.start_offset() + token_id_index * token_ids_layout.stride()[0]]
+                as usize;
+            if let Some(logit) = logits.get_mut(token_id) {
+                if *logit >= 0. {
+                    *logit /= self.penalty
+                } else {
+                    *logit *= self.penalty
+                }
+            }
+        }
+        Ok((CpuStorage::F32(logits), logits_layout.shape().clone()))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        logits: &candle::RocmStorage,
+        logits_layout: &Layout,
+        token_ids: &candle::RocmStorage,
+        token_ids_layout: &Layout,
+    ) -> Result<(candle::RocmStorage, Shape)> {
+        logits.repeat_penalty(logits_layout, token_ids, token_ids_layout, self.penalty)
+    }
 }
 
 /// Repeats a key or value tensor for grouped query attention

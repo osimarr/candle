@@ -130,6 +130,36 @@ __global__ void softmax_last_dim_f8e4m3_kernel(
     }
 }
 
+__global__ void repeat_penalty_f32_kernel(
+    const float* src,
+    size_t src_start_offset,
+    size_t src_stride,
+    const uint32_t* token_ids,
+    size_t token_ids_start_offset,
+    size_t token_ids_stride,
+    float* dst,
+    size_t elem_count,
+    size_t token_ids_count,
+    float penalty) {
+    const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= elem_count) {
+        return;
+    }
+    float value = src[src_start_offset + index * src_stride];
+    bool apply_penalty = false;
+    for (size_t id_index = 0; id_index < token_ids_count; ++id_index) {
+        const uint32_t token_id = token_ids[token_ids_start_offset + id_index * token_ids_stride];
+        if (static_cast<size_t>(token_id) == index) {
+            apply_penalty = true;
+            break;
+        }
+    }
+    if (apply_penalty) {
+        value = value >= 0.0f ? value / penalty : value * penalty;
+    }
+    dst[index] = value;
+}
+
 __global__ void rms_norm_f32_kernel(
     const float* src,
     size_t src_start_offset,
@@ -543,6 +573,38 @@ extern "C" int hip_softmax_last_dim_bf16(
         rows,
         cols);
     return check_last_launch_error("softmax_last_dim_bf16");
+}
+
+extern "C" int hip_repeat_penalty_f32(
+    int ordinal,
+    const float* src,
+    size_t src_start_offset,
+    size_t src_stride,
+    const uint32_t* token_ids,
+    size_t token_ids_start_offset,
+    size_t token_ids_stride,
+    float* dst,
+    size_t elem_count,
+    size_t token_ids_count,
+    float penalty) {
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    return launch_1d_async(
+        "repeat_penalty_f32",
+        elem_count,
+        repeat_penalty_f32_kernel,
+        src,
+        src_start_offset,
+        src_stride,
+        token_ids,
+        token_ids_start_offset,
+        token_ids_stride,
+        dst,
+        elem_count,
+        token_ids_count,
+        penalty);
 }
 
 extern "C" int hip_rms_norm_f32(

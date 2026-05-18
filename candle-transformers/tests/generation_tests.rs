@@ -1,5 +1,6 @@
 use candle::{Device, Result, Tensor};
 use candle_transformers::generation::LogitsProcessor;
+use candle_transformers::utils::apply_repeat_penalty;
 
 #[test]
 fn sample_with_zero_temperature() -> Result<()> {
@@ -74,5 +75,26 @@ fn sample_gumbel() -> Result<()> {
             panic!("pr mismatch {counts:?} {sm:?}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn repeat_penalty_cpu() -> Result<()> {
+    let logits = Tensor::new(&[2.0f32, -3.0, 4.0, -5.0], &Device::Cpu)?;
+    let logits = apply_repeat_penalty(&logits, 2.0, &[1, 2, 1, 10])?;
+    assert_eq!(logits.to_vec1::<f32>()?, &[2.0, -6.0, 2.0, -5.0]);
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn repeat_penalty_rocm() -> Result<()> {
+    let device = match Device::new_rocm(0) {
+        Ok(device) => device,
+        Err(_) => return Ok(()),
+    };
+    let logits = Tensor::new(&[2.0f32, -3.0, 4.0, -5.0], &device)?;
+    let logits = apply_repeat_penalty(&logits, 2.0, &[1, 2, 1, 10])?;
+    assert_eq!(logits.to_vec1::<f32>()?, &[2.0, -6.0, 2.0, -5.0]);
     Ok(())
 }

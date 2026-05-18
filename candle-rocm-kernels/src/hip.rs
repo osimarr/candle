@@ -1402,6 +1402,19 @@ unsafe extern "C" {
         rows: usize,
         cols: usize,
     ) -> c_int;
+    fn hip_repeat_penalty_f32(
+        ordinal: c_int,
+        src: *const f32,
+        src_start_offset: usize,
+        src_stride: usize,
+        token_ids: *const u32,
+        token_ids_start_offset: usize,
+        token_ids_stride: usize,
+        dst: *mut f32,
+        elem_count: usize,
+        token_ids_count: usize,
+        penalty: f32,
+    ) -> c_int;
     fn hip_rms_norm_f32(
         ordinal: c_int,
         src: *const f32,
@@ -3629,6 +3642,38 @@ pub(crate) fn softmax_last_dim_f8e4m3(
             )
         },
         "softmax_last_dim_f8e4m3",
+    )
+}
+
+pub(crate) fn repeat_penalty_f32(
+    src: &Buffer,
+    src_start_offset: usize,
+    src_stride: usize,
+    token_ids: &Buffer,
+    token_ids_start_offset: usize,
+    token_ids_stride: usize,
+    dst: &Buffer,
+    elem_count: usize,
+    token_ids_count: usize,
+    penalty: f32,
+) -> Result<()> {
+    check(
+        unsafe {
+            hip_repeat_penalty_f32(
+                ordinal_to_c_int(src.device_ordinal())?,
+                src.device_ptr().cast::<f32>(),
+                src_start_offset,
+                src_stride,
+                token_ids.device_ptr().cast::<u32>(),
+                token_ids_start_offset,
+                token_ids_stride,
+                dst.device_ptr().cast::<f32>(),
+                elem_count,
+                token_ids_count,
+                penalty,
+            )
+        },
+        "repeat_penalty_f32",
     )
 }
 
