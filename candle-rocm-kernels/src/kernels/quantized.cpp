@@ -36,6 +36,9 @@ static_assert(sizeof(BlockQ5_0) == 22);
 static_assert(sizeof(BlockQ4K) == 144);
 static_assert(sizeof(BlockQ6K) == 210);
 
+constexpr unsigned int QMATMUL_THREADS_PER_ROW = 64;
+constexpr unsigned int QMATMUL_ROWS_PER_BLOCK = 4;
+
 __device__ inline uint32_t read_u32_le(const uint8_t* src) {
     return static_cast<uint32_t>(src[0]) |
            (static_cast<uint32_t>(src[1]) << 8) |
@@ -135,7 +138,7 @@ __device__ inline float dequant_q6k(const BlockQ6K* blocks, size_t inner) {
            static_cast<float>(q);
 }
 
-template <typename Block, size_t BLOCK_SIZE, typename Dequant>
+template <typename Block, size_t BLOCK_SIZE, bool RHS_CONTIGUOUS, typename Dequant>
 __global__ void qmatmul_t_f32_kernel(
     const uint8_t* weights,
     const float* rhs,
@@ -146,39 +149,41 @@ __global__ void qmatmul_t_f32_kernel(
     size_t nrows,
     size_t ncols,
     size_t elem_count,
-    bool rhs_contiguous,
     Dequant dequant) {
-    const size_t index = blockIdx.x;
-    if (index >= elem_count) {
-        return;
-    }
-
-    const size_t row = index % nrows;
-    const size_t batch = index / nrows;
-    const size_t blocks_per_row = ncols / BLOCK_SIZE;
-    const Block* row_blocks = reinterpret_cast<const Block*>(weights) + row * blocks_per_row;
-
+    const size_t index = blockIdx.x * QMATMUL_ROWS_PER_BLOCK + threadIdx.y;
+    const bool active = index < elem_count;
     float acc = 0.0f;
-    const size_t rhs_base = batch * ncols;
-    for (size_t inner = threadIdx.x; inner < ncols; inner += blockDim.x) {
-        const size_t rhs_index = rhs_contiguous
-                                     ? rhs_start_offset + rhs_base + inner
-                                     : storage_index(rhs_base + inner, rhs_layout, rhs_start_offset);
-        acc += dequant(row_blocks, inner) * rhs[rhs_index];
+
+    if (active) {
+        const size_t row = index % nrows;
+        const size_t batch = index / nrows;
+        const size_t blocks_per_row = ncols / BLOCK_SIZE;
+        const Block* row_blocks = reinterpret_cast<const Block*>(weights) + row * blocks_per_row;
+        const size_t rhs_base = batch * ncols;
+
+        for (size_t inner = threadIdx.x; inner < ncols; inner += QMATMUL_THREADS_PER_ROW) {
+            size_t rhs_index;
+            if constexpr (RHS_CONTIGUOUS) {
+                rhs_index = rhs_start_offset + rhs_base + inner;
+            } else {
+                rhs_index = storage_index(rhs_base + inner, rhs_layout, rhs_start_offset);
+            }
+            acc += dequant(row_blocks, inner) * rhs[rhs_index];
+        }
     }
 
-    __shared__ float partial[256];
-    partial[threadIdx.x] = acc;
+    __shared__ float partial[QMATMUL_ROWS_PER_BLOCK][QMATMUL_THREADS_PER_ROW];
+    partial[threadIdx.y][threadIdx.x] = acc;
     __syncthreads();
 
-    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    for (unsigned int stride = QMATMUL_THREADS_PER_ROW / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride) {
-            partial[threadIdx.x] += partial[threadIdx.x + stride];
+            partial[threadIdx.y][threadIdx.x] += partial[threadIdx.y][threadIdx.x + stride];
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        dst[index] = partial[0];
+    if (active && threadIdx.x == 0) {
+        dst[index] = partial[threadIdx.y][0];
     }
 }
 
@@ -231,23 +236,44 @@ int launch_qmatmul_t_f32(
     if (rc != 0) {
         return rc;
     }
-    hipLaunchKernelGGL(
-        (qmatmul_t_f32_kernel<Block, BLOCK_SIZE, Dequant>),
-        dim3(static_cast<unsigned int>(elem_count)),
-        dim3(256),
-        0,
-        0,
-        weights,
-        rhs,
-        rhs_layout,
-        rhs_start_offset,
-        dst,
-        batch_size,
-        nrows,
-        ncols,
-        elem_count,
-        is_contiguous(rhs_layout),
-        dequant);
+    const dim3 grid(static_cast<unsigned int>(
+        (elem_count + QMATMUL_ROWS_PER_BLOCK - 1) / QMATMUL_ROWS_PER_BLOCK));
+    const dim3 block(QMATMUL_THREADS_PER_ROW, QMATMUL_ROWS_PER_BLOCK);
+    if (is_contiguous(rhs_layout)) {
+        hipLaunchKernelGGL(
+            (qmatmul_t_f32_kernel<Block, BLOCK_SIZE, true, Dequant>),
+            grid,
+            block,
+            0,
+            0,
+            weights,
+            rhs,
+            rhs_layout,
+            rhs_start_offset,
+            dst,
+            batch_size,
+            nrows,
+            ncols,
+            elem_count,
+            dequant);
+    } else {
+        hipLaunchKernelGGL(
+            (qmatmul_t_f32_kernel<Block, BLOCK_SIZE, false, Dequant>),
+            grid,
+            block,
+            0,
+            0,
+            weights,
+            rhs,
+            rhs_layout,
+            rhs_start_offset,
+            dst,
+            batch_size,
+            nrows,
+            ncols,
+            elem_count,
+            dequant);
+    }
     return check_last_launch_error(op);
 }
 
