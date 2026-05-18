@@ -23,26 +23,14 @@ struct Args {
     model_id: Option<String>,
 }
 
-#[cfg(feature = "cuda")]
-fn use_cpu() -> bool {
-    true
-}
-
-#[cfg(not(feature = "cuda"))]
-fn use_cpu() -> bool {
-    false
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
-
-    let use_cpu = args.cpu || !use_cpu();
 
     let model_id = args.model_id.unwrap();
 
     // Create model - equivalent to loading the model and processor in Python
     let mut model =
-        VoxtralModel::new(&model_id, use_cpu).context("Failed to load Voxtral model")?;
+        VoxtralModel::new(&model_id, args.cpu).context("Failed to load Voxtral model")?;
 
     println!("Model loaded successfully on device: {:?}", model.device());
 
