@@ -421,6 +421,34 @@ fn rocm_f16_load_quantized_is_native() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_q4_0_load_quantized_round_trip() -> Result<()> {
+    let rocm = Device::new_rocm(0)?;
+    let cpu = Device::Cpu;
+    let values = (0..128).map(|v| v as f32 / 17.).collect::<Vec<_>>();
+    let src = Tensor::from_slice(&values, (values.len(),), &cpu)?;
+    let cpu_quant = quantized::QTensor::quantize(&src, GgmlDType::Q4_0)?;
+    let raw = cpu_quant.data()?;
+    let storage = quantized::QStorage::from_data(
+        std::borrow::Cow::Borrowed(raw.as_ref()),
+        &rocm,
+        GgmlDType::Q4_0,
+    )?;
+    let rocm_quant = quantized::QTensor::new(storage, (values.len(),))?;
+    assert!(rocm_quant.device().is_rocm());
+    assert_eq!(rocm_quant.storage_size_in_bytes(), raw.len());
+    assert_eq!(&*rocm_quant.data()?, raw.as_ref());
+
+    let expected = cpu_quant.dequantize(&cpu)?.to_vec1::<f32>()?;
+    let actual = rocm_quant
+        .dequantize(&rocm)?
+        .to_device(&cpu)?
+        .to_vec1::<f32>()?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
 fn quantize_q4_0(device: &Device) -> Result<()> {
     let src = (0..32 * 4).map(|v| v as f32).collect::<Vec<_>>();
 

@@ -1,9 +1,10 @@
-use super::{GgmlDType, QStorage, QuantizedType};
+use super::{k_quants, GgmlDType, QStorage, QuantizedType};
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::{CpuStorage, DType, Layout, Result, RocmDevice, RocmStorage, Shape};
 use candle_rocm_kernels as kernels;
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 use std::borrow::Cow;
+use std::mem;
 
 pub struct QRocmStorage {
     dtype: GgmlDType,
@@ -12,7 +13,10 @@ pub struct QRocmStorage {
 }
 
 enum QRocmStorageData {
-    Cpu(Box<dyn QuantizedType>),
+    Raw {
+        buffer: kernels::Buffer,
+        elem_count: usize,
+    },
     NativeFloat16 {
         buffer: kernels::Buffer,
         elem_count: usize,
@@ -31,18 +35,12 @@ impl QRocmStorage {
                 storage: QRocmStorageData::NativeFloat16 { buffer, elem_count },
             });
         }
-        let op = kernels::quantized::QuantizedOp {
-            name: "zeros",
-            device: Some(device.kernel_device()),
-            input: None,
-        };
-        let storage = kernels::quantized::call_zeros(op, || {
-            Ok::<Box<dyn QuantizedType>, crate::Error>(dtype.cpu_zeros(elem_count))
-        })?;
+        let size_in_bytes = quantized_storage_size_in_bytes(dtype, elem_count)?;
+        let buffer = kernels::quantized::zeros(device.kernel_device(), size_in_bytes)?;
         Ok(Self {
             dtype,
             device: device.clone(),
-            storage: QRocmStorageData::Cpu(storage),
+            storage: QRocmStorageData::Raw { buffer, elem_count },
         })
     }
 
@@ -83,19 +81,10 @@ impl QRocmStorage {
                 );
             }
         }
-        let op = kernels::quantized::QuantizedOp {
-            name: "dequantize",
-            device: Some(self.device.kernel_device()),
-            input: None,
-        };
-        let storage = kernels::quantized::call_dequantize(op, || match &self.storage {
-            QRocmStorageData::Cpu(storage) => storage.dequantize(elem_count),
-            QRocmStorageData::NativeFloat16 { .. } => {
-                crate::bail!(
-                    "native {:?} dequantize is unavailable without HIP",
-                    self.dtype
-                )
-            }
+        let op = self.op("dequantize")?;
+        let storage = kernels::quantized::call_dequantize(op, || {
+            let storage = self.raw_cpu_storage(elem_count, "dequantize")?;
+            storage.dequantize(elem_count)
         })?;
         self.device.storage_from_cpu_storage_owned(storage)
     }
@@ -114,11 +103,7 @@ impl QRocmStorage {
                 return Ok(());
             }
         }
-        let op = kernels::quantized::QuantizedOp {
-            name: "quantize",
-            device: Some(self.device.kernel_device()),
-            input: Some(src.tensor_arg()?),
-        };
+        let op = self.op_with_input("quantize", src)?;
         let src = kernels::quantized::call_quantize(op, || src.to_cpu_storage())?;
         self.quantize_onto(&src)
     }
@@ -129,11 +114,7 @@ impl QRocmStorage {
         imatrix_weights: &[f32],
         n_per_row: usize,
     ) -> Result<()> {
-        let op = kernels::quantized::QuantizedOp {
-            name: "quantize_imatrix",
-            device: Some(self.device.kernel_device()),
-            input: Some(src.tensor_arg()?),
-        };
+        let op = self.op_with_input("quantize_imatrix", src)?;
         let src = kernels::quantized::call_quantize_imatrix(op, || src.to_cpu_storage())?;
         self.quantize_imatrix_onto(&src, imatrix_weights, n_per_row)
     }
@@ -144,19 +125,23 @@ impl QRocmStorage {
             *buffer = self.device.kernel_device().copy_from_host(&bytes)?;
             return Ok(());
         }
+        let device = self.device.clone();
+        let dtype = self.dtype;
+        let QRocmStorageData::Raw { buffer, elem_count } = &mut self.storage else {
+            crate::bail!(
+                "native {:?} quantize_onto is unavailable without HIP",
+                self.dtype
+            )
+        };
         let op = kernels::quantized::QuantizedOp {
             name: "quantize_onto",
-            device: Some(self.device.kernel_device()),
+            device: Some(device.kernel_device()),
             input: None,
         };
         kernels::quantized::call_quantize_onto(op, || {
-            let QRocmStorageData::Cpu(storage) = &mut self.storage else {
-                crate::bail!(
-                    "native {:?} quantize_onto is unavailable without HIP",
-                    self.dtype
-                )
-            };
-            storage.from_float(src.as_slice::<f32>()?);
+            let bytes =
+                cpu_storage_to_raw_quantized_bytes(dtype, src, *elem_count, None, "quantize_onto")?;
+            *buffer = kernels::quantized::load_quantized(device.kernel_device(), &bytes)?;
             Ok(())
         })
     }
@@ -167,23 +152,35 @@ impl QRocmStorage {
         imatrix_weights: &[f32],
         n_per_row: usize,
     ) -> Result<()> {
+        let device = self.device.clone();
+        let dtype = self.dtype;
+        let QRocmStorageData::Raw { buffer, elem_count } = &mut self.storage else {
+            crate::bail!(
+                "native {:?} quantize_imatrix_onto is unavailable without HIP",
+                self.dtype
+            )
+        };
         let op = kernels::quantized::QuantizedOp {
             name: "quantize_imatrix_onto",
-            device: Some(self.device.kernel_device()),
+            device: Some(device.kernel_device()),
             input: None,
         };
         kernels::quantized::call_quantize_imatrix_onto(op, || {
-            let QRocmStorageData::Cpu(storage) = &mut self.storage else {
-                crate::bail!("native {:?} imatrix quantize is not supported", self.dtype)
-            };
-            storage.from_float_imatrix(src.as_slice::<f32>()?, imatrix_weights, n_per_row);
+            let bytes = cpu_storage_to_raw_quantized_bytes(
+                dtype,
+                src,
+                *elem_count,
+                Some((imatrix_weights, n_per_row)),
+                "quantize_imatrix_onto",
+            )?;
+            *buffer = kernels::quantized::load_quantized(device.kernel_device(), &bytes)?;
             Ok(())
         })
     }
 
     pub fn storage_size_in_bytes(&self) -> usize {
         match &self.storage {
-            QRocmStorageData::Cpu(storage) => storage.storage_size_in_bytes(),
+            QRocmStorageData::Raw { buffer, .. } => buffer.size_in_bytes(),
             QRocmStorageData::NativeFloat16 { buffer, .. } => buffer.size_in_bytes(),
         }
     }
@@ -209,20 +206,11 @@ impl QRocmStorage {
         }
         dst_shape.push(n);
         let dst_shape = Shape::from(dst_shape);
-        let op = kernels::quantized::QuantizedOp {
-            name: "matmul_t",
-            device: Some(self.device.kernel_device()),
-            input: None,
-        };
-        let dst_storage =
-            kernels::quantized::call_matmul_t(op, || match (&self.storage, storage.dtype()) {
-                (QRocmStorageData::NativeFloat16 { .. }, _) => {
-                    crate::bail!(
-                        "native {:?} quantized storage should be dequantized before matmul",
-                        self.dtype
-                    )
-                }
-                (QRocmStorageData::Cpu(qstorage), DType::F32) => {
+        let op = self.op("matmul_t")?;
+        let dst_storage = kernels::quantized::call_matmul_t(op, || {
+            let qstorage = self.raw_cpu_storage(self_shape.elem_count(), "matmul_t")?;
+            match storage.dtype() {
+                DType::F32 => {
                     let slice = storage.as_slice::<f32>()?;
                     let slice = &slice
                         [layout.start_offset()..layout.start_offset() + src_shape.elem_count()];
@@ -234,7 +222,7 @@ impl QRocmStorage {
                     )?;
                     Ok(CpuStorage::F32(dst_storage))
                 }
-                (QRocmStorageData::Cpu(qstorage), DType::F16) => {
+                DType::F16 => {
                     let slice = storage.as_slice::<f16>()?;
                     let slice = &slice
                         [layout.start_offset()..layout.start_offset() + src_shape.elem_count()];
@@ -247,32 +235,169 @@ impl QRocmStorage {
                     Ok(CpuStorage::F16(dst_storage))
                 }
                 _ => crate::bail!("Expected f32/f16"),
-            })?;
+            }
+        })?;
         Ok((dst_storage, dst_shape))
     }
 
-    pub fn data(&self) -> Result<Cow<'_, [u8]>> {
-        if let QRocmStorageData::NativeFloat16 { buffer, .. } = &self.storage {
-            let mut data = vec![0; buffer.size_in_bytes()];
-            self.device
-                .kernel_device()
-                .copy_to_host(buffer, &mut data)?;
-            return Ok(Cow::Owned(data));
+    pub fn fwd(
+        &self,
+        self_shape: &Shape,
+        storage: &RocmStorage,
+        layout: &Layout,
+    ) -> Result<(RocmStorage, Shape)> {
+        let src_shape = layout.shape();
+        let (n, k) = self_shape.dims2()?;
+        if src_shape.rank() < 2 {
+            crate::bail!("input tensor has only one dimension {layout:?}")
         }
-        let op = kernels::quantized::QuantizedOp {
-            name: "data",
+        let mut dst_shape = src_shape.dims().to_vec();
+        let last_k = dst_shape.pop().unwrap();
+        if last_k != k {
+            crate::bail!("input tensor {layout:?} incompatible with {self_shape:?}")
+        }
+        dst_shape.push(n);
+        let dst_shape = Shape::from(dst_shape);
+
+        if let Some(buffer) = self.try_fwd(self_shape, storage, layout, n, k, &dst_shape)? {
+            return RocmStorage::from_buffer(
+                buffer,
+                self.device.clone(),
+                DType::F32,
+                dst_shape.elem_count(),
+                "qmatmul",
+            )
+            .map(|storage| (storage, dst_shape));
+        }
+
+        let storage = storage.to_cpu_storage()?;
+        let (storage, shape) = self.fwd_cpu(self_shape, &storage, layout)?;
+        self.device
+            .storage_from_cpu_storage_owned(storage)
+            .map(|storage| (storage, shape))
+    }
+
+    pub fn data(&self) -> Result<Cow<'_, [u8]>> {
+        let op = self.op("data")?;
+        kernels::quantized::call_data(op, || Ok(Cow::Owned(self.raw_data()?)))
+    }
+
+    fn op(&self, name: &'static str) -> Result<kernels::quantized::QuantizedOp<'_>> {
+        Ok(kernels::quantized::QuantizedOp {
+            name,
             device: Some(self.device.kernel_device()),
             input: None,
-        };
-        kernels::quantized::call_data(op, || {
-            let QRocmStorageData::Cpu(storage) = &self.storage else {
-                crate::bail!("native {:?} data is unavailable without HIP", self.dtype)
-            };
-            let data_ptr = storage.as_ptr();
-            let size_in_bytes = storage.storage_size_in_bytes();
-            let data = unsafe { std::slice::from_raw_parts(data_ptr, size_in_bytes) };
-            Ok(Cow::from(data))
         })
+    }
+
+    fn op_with_input(
+        &self,
+        name: &'static str,
+        src: &RocmStorage,
+    ) -> Result<kernels::quantized::QuantizedOp<'_>> {
+        Ok(kernels::quantized::QuantizedOp {
+            name,
+            device: Some(self.device.kernel_device()),
+            input: Some(src.tensor_arg()?),
+        })
+    }
+
+    fn raw_data(&self) -> Result<Vec<u8>> {
+        let buffer = match &self.storage {
+            QRocmStorageData::Raw { buffer, .. } => buffer,
+            QRocmStorageData::NativeFloat16 { buffer, .. } => buffer,
+        };
+        Ok(kernels::quantized::data(
+            self.device.kernel_device(),
+            buffer,
+        )?)
+    }
+
+    fn try_fwd(
+        &self,
+        self_shape: &Shape,
+        storage: &RocmStorage,
+        layout: &Layout,
+        nrows: usize,
+        ncols: usize,
+        dst_shape: &Shape,
+    ) -> Result<Option<kernels::Buffer>> {
+        let QRocmStorageData::Raw {
+            buffer,
+            elem_count: storage_elem_count,
+        } = &self.storage
+        else {
+            return Ok(None);
+        };
+        if *storage_elem_count != self_shape.elem_count() {
+            crate::bail!(
+                "invalid {:?} matmul_t elem count: storage has {storage_elem_count}, requested {}",
+                self.dtype,
+                self_shape.elem_count()
+            )
+        }
+        let Some(dtype) = kernel_quantized_dtype(self.dtype) else {
+            return Ok(None);
+        };
+        if storage.dtype() != DType::F32 {
+            return Ok(None);
+        }
+        let rhs = storage.tensor_arg()?;
+        let rhs_layout = kernels::LayoutArg::new(
+            layout.shape().dims().to_vec(),
+            layout.stride().to_vec(),
+            layout.start_offset(),
+        )
+        .map_err(crate::Error::from)?;
+        let op = kernels::quantized::MatMulOp {
+            name: "qmatmul",
+            device: self.device.kernel_device(),
+            weights: buffer,
+            rhs,
+            rhs_layout,
+            output: kernels::TensorOutput::new(kernels::KernelDType::F32, dst_shape.elem_count()),
+            batch_size: dst_shape.elem_count() / nrows,
+            nrows,
+            ncols,
+        };
+        kernels::quantized::try_matmul_t(dtype, &op).map_err(crate::Error::from)
+    }
+
+    fn raw_cpu_storage(
+        &self,
+        elem_count: usize,
+        op: &'static str,
+    ) -> Result<Box<dyn QuantizedType>> {
+        match &self.storage {
+            QRocmStorageData::Raw {
+                buffer,
+                elem_count: storage_elem_count,
+            } => {
+                if elem_count != *storage_elem_count {
+                    crate::bail!(
+                        "invalid {:?} {op} elem count: storage has {storage_elem_count}, requested {elem_count}",
+                        self.dtype
+                    )
+                }
+                let data = kernels::quantized::data(self.device.kernel_device(), buffer)?;
+                qstorage_from_raw_bytes(self.dtype, &data)
+            }
+            QRocmStorageData::NativeFloat16 { .. } => {
+                crate::bail!(
+                    "native {:?} quantized storage should be dequantized before {op}",
+                    self.dtype
+                )
+            }
+        }
+    }
+}
+
+fn kernel_quantized_dtype(dtype: GgmlDType) -> Option<kernels::quantized::QuantizedDType> {
+    match dtype {
+        GgmlDType::Q5_0 => Some(kernels::quantized::QuantizedDType::Q5_0),
+        GgmlDType::Q4K => Some(kernels::quantized::QuantizedDType::Q4K),
+        GgmlDType::Q6K => Some(kernels::quantized::QuantizedDType::Q6K),
+        _ => None,
     }
 }
 
@@ -324,23 +449,23 @@ fn cpu_storage_to_native_float16_bytes(
 ) -> Result<Vec<u8>> {
     match (dtype, src) {
         (GgmlDType::F16, CpuStorage::F32(values)) => {
-            check_native_float16_len(dtype, elem_count, values.len(), "quantize_onto")?;
+            check_quantized_elem_count(dtype, elem_count, values.len(), "quantize_onto")?;
             let mut values_f16 = vec![f16::ZERO; values.len()];
             values_f16.convert_from_f32_slice(values);
             Ok(slice_to_bytes(&values_f16).to_vec())
         }
         (GgmlDType::F16, CpuStorage::F16(values)) => {
-            check_native_float16_len(dtype, elem_count, values.len(), "quantize_onto")?;
+            check_quantized_elem_count(dtype, elem_count, values.len(), "quantize_onto")?;
             Ok(slice_to_bytes(values).to_vec())
         }
         (GgmlDType::BF16, CpuStorage::F32(values)) => {
-            check_native_float16_len(dtype, elem_count, values.len(), "quantize_onto")?;
+            check_quantized_elem_count(dtype, elem_count, values.len(), "quantize_onto")?;
             let mut values_bf16 = vec![bf16::ZERO; values.len()];
             values_bf16.convert_from_f32_slice(values);
             Ok(slice_to_bytes(&values_bf16).to_vec())
         }
         (GgmlDType::BF16, CpuStorage::BF16(values)) => {
-            check_native_float16_len(dtype, elem_count, values.len(), "quantize_onto")?;
+            check_quantized_elem_count(dtype, elem_count, values.len(), "quantize_onto")?;
             Ok(slice_to_bytes(values).to_vec())
         }
         (GgmlDType::F16, _) => crate::bail!("only f32/f16 can be quantized into native f16"),
@@ -349,7 +474,83 @@ fn cpu_storage_to_native_float16_bytes(
     }
 }
 
-fn check_native_float16_len(
+fn quantized_storage_size_in_bytes(dtype: GgmlDType, elem_count: usize) -> Result<usize> {
+    let block_size = dtype.block_size();
+    if !elem_count.is_multiple_of(block_size) {
+        crate::bail!(
+            "invalid {dtype:?} storage size: element count {elem_count} is not divisible by block size {block_size}"
+        )
+    }
+    Ok(elem_count / block_size * dtype.type_size())
+}
+
+fn qstorage_from_raw_bytes(dtype: GgmlDType, data: &[u8]) -> Result<Box<dyn QuantizedType>> {
+    match dtype {
+        GgmlDType::F32 => raw_data_to_cpu_storage::<f32>(dtype, data),
+        GgmlDType::F16 => raw_data_to_cpu_storage::<f16>(dtype, data),
+        GgmlDType::BF16 => raw_data_to_cpu_storage::<bf16>(dtype, data),
+        GgmlDType::Q4_0 => raw_data_to_cpu_storage::<k_quants::BlockQ4_0>(dtype, data),
+        GgmlDType::Q4_1 => raw_data_to_cpu_storage::<k_quants::BlockQ4_1>(dtype, data),
+        GgmlDType::Q5_0 => raw_data_to_cpu_storage::<k_quants::BlockQ5_0>(dtype, data),
+        GgmlDType::Q5_1 => raw_data_to_cpu_storage::<k_quants::BlockQ5_1>(dtype, data),
+        GgmlDType::Q8_0 => raw_data_to_cpu_storage::<k_quants::BlockQ8_0>(dtype, data),
+        GgmlDType::Q8_1 => raw_data_to_cpu_storage::<k_quants::BlockQ8_1>(dtype, data),
+        GgmlDType::Q2K => raw_data_to_cpu_storage::<k_quants::BlockQ2K>(dtype, data),
+        GgmlDType::Q3K => raw_data_to_cpu_storage::<k_quants::BlockQ3K>(dtype, data),
+        GgmlDType::Q4K => raw_data_to_cpu_storage::<k_quants::BlockQ4K>(dtype, data),
+        GgmlDType::Q5K => raw_data_to_cpu_storage::<k_quants::BlockQ5K>(dtype, data),
+        GgmlDType::Q6K => raw_data_to_cpu_storage::<k_quants::BlockQ6K>(dtype, data),
+        GgmlDType::Q8K => raw_data_to_cpu_storage::<k_quants::BlockQ8K>(dtype, data),
+    }
+}
+
+fn raw_data_to_cpu_storage<T: super::GgmlType + Send + Sync + 'static>(
+    dtype: GgmlDType,
+    data: &[u8],
+) -> Result<Box<dyn QuantizedType>> {
+    let size = mem::size_of::<T>();
+    if data.len() % size != 0 {
+        crate::bail!(
+            "invalid {dtype:?} raw storage size: {} is not divisible by {size}",
+            data.len()
+        )
+    }
+    let mut storage = vec![T::zeros(); data.len() / size];
+    let dst =
+        unsafe { std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), data.len()) };
+    dst.copy_from_slice(data);
+    Ok(Box::new(storage))
+}
+
+fn cpu_storage_to_raw_quantized_bytes(
+    dtype: GgmlDType,
+    src: &CpuStorage,
+    elem_count: usize,
+    imatrix: Option<(&[f32], usize)>,
+    op: &'static str,
+) -> Result<Vec<u8>> {
+    if matches!(dtype, GgmlDType::F16 | GgmlDType::BF16) {
+        if imatrix.is_some() {
+            crate::bail!("{dtype:?} imatrix quantize is not supported")
+        }
+        return cpu_storage_to_native_float16_bytes(dtype, src, elem_count);
+    }
+    let values = src.as_slice::<f32>()?;
+    check_quantized_elem_count(dtype, elem_count, values.len(), op)?;
+    let mut storage = dtype.cpu_zeros(elem_count);
+    match imatrix {
+        None => storage.from_float(values),
+        Some((imatrix_weights, n_per_row)) => {
+            storage.from_float_imatrix(values, imatrix_weights, n_per_row)
+        }
+    }
+    let data_ptr = storage.as_ptr();
+    let size_in_bytes = storage.storage_size_in_bytes();
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, size_in_bytes) };
+    Ok(data.to_vec())
+}
+
+fn check_quantized_elem_count(
     dtype: GgmlDType,
     storage_elem_count: usize,
     input_elem_count: usize,
@@ -373,10 +574,17 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
     device: &RocmDevice,
     data: &[T],
 ) -> Result<QStorage> {
+    let bytes = slice_to_bytes(data);
+    let op = kernels::quantized::QuantizedOp {
+        name: "load_quantized",
+        device: Some(device.kernel_device()),
+        input: None,
+    };
     if supports_native_float16(T::DTYPE) {
-        let buffer = device
-            .kernel_device()
-            .copy_from_host(slice_to_bytes(data))?;
+        let buffer = kernels::quantized::call_load_quantized(op, || {
+            kernels::quantized::load_quantized(device.kernel_device(), bytes)
+                .map_err(crate::Error::from)
+        })?;
         return Ok(QStorage::Rocm(QRocmStorage {
             dtype: T::DTYPE,
             device: device.clone(),
@@ -386,16 +594,43 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
             },
         }));
     }
-    let op = kernels::quantized::QuantizedOp {
-        name: "load_quantized",
-        device: Some(device.kernel_device()),
-        input: None,
-    };
-    kernels::quantized::call_load_quantized(op, || {
-        Ok(QStorage::Rocm(QRocmStorage {
-            dtype: T::DTYPE,
-            device: device.clone(),
-            storage: QRocmStorageData::Cpu(Box::new(data.to_vec())),
-        }))
-    })
+    let buffer = kernels::quantized::call_load_quantized(op, || {
+        kernels::quantized::load_quantized(device.kernel_device(), bytes)
+            .map_err(crate::Error::from)
+    })?;
+    Ok(QStorage::Rocm(QRocmStorage {
+        dtype: T::DTYPE,
+        device: device.clone(),
+        storage: QRocmStorageData::Raw {
+            buffer,
+            elem_count: data.len() * T::BLCK_SIZE,
+        },
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{super::GgmlType, *};
+
+    #[test]
+    fn load_quantized_non_native_uses_raw_buffer() -> Result<()> {
+        let device = crate::Device::new_rocm(0)?;
+        let device = device.as_rocm_device()?;
+        let blocks = vec![k_quants::BlockQ4_0::zeros(); 2];
+        let storage = load_quantized(device, &blocks)?;
+        let QStorage::Rocm(storage) = storage else {
+            unreachable!("load_quantized on a ROCm device returns ROCm storage")
+        };
+
+        assert!(matches!(&storage.storage, QRocmStorageData::Raw { .. }));
+        assert_eq!(
+            storage.storage_size_in_bytes(),
+            std::mem::size_of_val(blocks.as_slice())
+        );
+        assert_eq!(
+            storage.data()?.len(),
+            std::mem::size_of_val(blocks.as_slice())
+        );
+        Ok(())
+    }
 }

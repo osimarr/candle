@@ -83,6 +83,7 @@ const HIP_SOURCES: &[&str] = &[
     "src/kernels/random.cpp",
     "src/kernels/conv.cpp",
     "src/kernels/matmul.cpp",
+    "src/kernels/quantized.cpp",
     "src/kernels/indexing.cpp",
     "src/kernels/ternary.cpp",
     "src/kernels/sort.cpp",

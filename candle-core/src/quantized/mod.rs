@@ -905,6 +905,18 @@ impl crate::CustomOp1 for QTensor {
         };
         self_storage.fwd(&self.shape, storage, layout)
     }
+
+    fn rocm_fwd(
+        &self,
+        storage: &crate::RocmStorage,
+        layout: &crate::Layout,
+    ) -> Result<(crate::RocmStorage, Shape)> {
+        let self_storage = match &self.storage {
+            QStorage::Rocm(rocm) => rocm,
+            _ => unreachable!("Cannot call rocm matmul on non rocm QTensor"),
+        };
+        self_storage.fwd(&self.shape, storage, layout)
+    }
 }
 
 impl crate::Module for QMatMul {

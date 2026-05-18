@@ -475,15 +475,37 @@ pub mod device {
 }
 
 pub mod quantized {
-    use crate::{cpu_fallback, Buffer, Device, TensorArg};
+    #[cfg(not(hip_runtime))]
+    use crate::LayoutArg;
+    use crate::{cpu_fallback, Buffer, Device, TensorArg, TensorOutput};
     #[cfg(hip_runtime)]
     use crate::{KernelDType, LayoutArg, RocmError};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum QuantizedDType {
+        Q5_0,
+        Q4K,
+        Q6K,
+    }
 
     #[derive(Clone, Debug)]
     pub struct QuantizedOp<'a> {
         pub name: &'static str,
         pub device: Option<&'a Device>,
         pub input: Option<TensorArg>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct MatMulOp<'a> {
+        pub name: &'static str,
+        pub device: &'a Device,
+        pub weights: &'a Buffer,
+        pub rhs: TensorArg,
+        pub rhs_layout: LayoutArg,
+        pub output: TensorOutput,
+        pub batch_size: usize,
+        pub nrows: usize,
+        pub ncols: usize,
     }
 
     pub fn call_zeros<T, E, F>(op: QuantizedOp<'_>, fallback: F) -> std::result::Result<T, E>
@@ -559,6 +581,120 @@ pub mod quantized {
         F: FnOnce() -> std::result::Result<T, E>,
     {
         cpu_fallback(op.name, fallback)
+    }
+
+    pub fn zeros(device: &Device, size_in_bytes: usize) -> crate::Result<Buffer> {
+        device.allocate_zeroed(size_in_bytes)
+    }
+
+    pub fn load_quantized(device: &Device, data: &[u8]) -> crate::Result<Buffer> {
+        device.copy_from_host(data)
+    }
+
+    pub fn data(device: &Device, buffer: &Buffer) -> crate::Result<Vec<u8>> {
+        let mut data = vec![0; buffer.size_in_bytes()];
+        device.copy_to_host(buffer, &mut data)?;
+        Ok(data)
+    }
+
+    pub fn try_matmul_t(dtype: QuantizedDType, op: &MatMulOp<'_>) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (dtype, op);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if op.rhs.dtype() != KernelDType::F32 || op.output.dtype() != KernelDType::F32 {
+                return Ok(None);
+            }
+            if op.weights.device_ordinal() != op.device.ordinal()
+                || op.rhs.buffer().device_ordinal() != op.device.ordinal()
+            {
+                let got = if op.weights.device_ordinal() != op.device.ordinal() {
+                    op.weights.device_ordinal()
+                } else {
+                    op.rhs.buffer().device_ordinal()
+                };
+                return Err(RocmError::DeviceMismatch {
+                    expected: op.device.ordinal(),
+                    got,
+                    op: op.name,
+                });
+            }
+            if op.ncols == 0
+                || op.nrows == 0
+                || op.batch_size == 0
+                || op.output.elem_count() != op.batch_size * op.nrows
+                || op.rhs_layout.elem_count() != op.batch_size * op.ncols
+            {
+                return Err(RocmError::Runtime(format!(
+                    "invalid quantized matmul shape for {}: batch {}, nrows {}, ncols {}, rhs elems {}, output elems {}",
+                    op.name,
+                    op.batch_size,
+                    op.nrows,
+                    op.ncols,
+                    op.rhs_layout.elem_count(),
+                    op.output.elem_count()
+                )));
+            }
+
+            let (block_size, type_size) = match dtype {
+                QuantizedDType::Q5_0 => (32, 22),
+                QuantizedDType::Q4K => (256, 144),
+                QuantizedDType::Q6K => (256, 210),
+            };
+            if !op.ncols.is_multiple_of(block_size) {
+                return Err(RocmError::Runtime(format!(
+                    "invalid quantized matmul shape for {}: ncols {} is not divisible by block size {}",
+                    op.name, op.ncols, block_size
+                )));
+            }
+            let expected_weights = op.nrows * (op.ncols / block_size) * type_size;
+            if op.weights.size_in_bytes() != expected_weights {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: op.weights.size_in_bytes(),
+                    offset: 0,
+                    requested: expected_weights,
+                });
+            }
+
+            let dst = op.device.allocate(
+                op.output
+                    .dtype()
+                    .storage_size_in_bytes(op.output.elem_count()),
+            )?;
+            match dtype {
+                QuantizedDType::Q5_0 => crate::hip::qmatmul_t_q5_0_f32(
+                    op.weights,
+                    op.rhs.buffer(),
+                    &op.rhs_layout,
+                    &dst,
+                    op.batch_size,
+                    op.nrows,
+                    op.ncols,
+                )?,
+                QuantizedDType::Q4K => crate::hip::qmatmul_t_q4k_f32(
+                    op.weights,
+                    op.rhs.buffer(),
+                    &op.rhs_layout,
+                    &dst,
+                    op.batch_size,
+                    op.nrows,
+                    op.ncols,
+                )?,
+                QuantizedDType::Q6K => crate::hip::qmatmul_t_q6k_f32(
+                    op.weights,
+                    op.rhs.buffer(),
+                    &op.rhs_layout,
+                    &dst,
+                    op.batch_size,
+                    op.nrows,
+                    op.ncols,
+                )?,
+            }
+            Ok(Some(dst))
+        }
     }
 
     pub fn supports_native_bf16() -> bool {
@@ -678,6 +814,27 @@ pub mod quantized {
             let layout = LayoutArg::new(vec![elem_count], vec![1], 0)?;
             crate::hip::cast_f16_to_f32(src, &layout, &dst)?;
             Ok(Some(dst))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn quantized_load_round_trip() {
+            let device = Device::new(0).unwrap();
+            let raw = [1u8, 2, 3, 5, 8, 13];
+            let buffer = load_quantized(&device, &raw).unwrap();
+            assert_eq!(buffer.size_in_bytes(), raw.len());
+            assert_eq!(data(&device, &buffer).unwrap(), raw);
+        }
+
+        #[test]
+        fn quantized_zeros_are_zeroed() {
+            let device = Device::new(0).unwrap();
+            let buffer = zeros(&device, 17).unwrap();
+            assert_eq!(data(&device, &buffer).unwrap(), vec![0; 17]);
         }
     }
 }
