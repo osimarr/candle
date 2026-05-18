@@ -94,23 +94,34 @@ __global__ void rms_norm_f32_kernel(
     size_t rows,
     size_t cols,
     float eps) {
-    const size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.x;
     if (row >= rows) {
         return;
     }
     const float* src_row = src + src_start_offset + row * cols;
     const float* alpha_row = alpha + alpha_start_offset;
+
     float sum2 = 0.0f;
-    for (size_t col = 0; col < cols; ++col) {
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const float value = src_row[col];
-        volatile float squared = value * value;
-        sum2 += squared;
+        sum2 += value * value;
     }
-    const float mean = sum2 * (1.0f / static_cast<float>(cols));
-    const float denom = sqrtf(mean + eps);
+
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum2;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    const float inv_denom = rsqrtf(partial[0] * (1.0f / static_cast<float>(cols)) + eps);
     float* dst_row = dst + row * cols;
-    for (size_t col = 0; col < cols; ++col) {
-        dst_row[col] = (src_row[col] / denom) * alpha_row[col];
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        dst_row[col] = src_row[col] * inv_denom * alpha_row[col];
     }
 }
 
@@ -497,10 +508,12 @@ extern "C" int hip_rms_norm_f32(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d_async(
-        "rms_norm_f32",
-        rows,
+    hipLaunchKernelGGL(
         rms_norm_f32_kernel,
+        dim3(static_cast<unsigned int>(rows)),
+        dim3(256),
+        0,
+        0,
         src,
         src_start_offset,
         alpha,
@@ -509,6 +522,7 @@ extern "C" int hip_rms_norm_f32(
         rows,
         cols,
         eps);
+    return check_last_launch_error("rms_norm_f32");
 }
 
 extern "C" int hip_rms_norm_bf16(
