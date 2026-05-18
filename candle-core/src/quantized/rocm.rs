@@ -395,6 +395,7 @@ impl QRocmStorage {
 fn kernel_quantized_dtype(dtype: GgmlDType) -> Option<kernels::quantized::QuantizedDType> {
     match dtype {
         GgmlDType::Q5_0 => Some(kernels::quantized::QuantizedDType::Q5_0),
+        GgmlDType::Q8_0 => Some(kernels::quantized::QuantizedDType::Q8_0),
         GgmlDType::Q4K => Some(kernels::quantized::QuantizedDType::Q4K),
         GgmlDType::Q6K => Some(kernels::quantized::QuantizedDType::Q6K),
         _ => None,

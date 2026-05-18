@@ -484,6 +484,7 @@ pub mod quantized {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum QuantizedDType {
         Q5_0,
+        Q8_0,
         Q4K,
         Q6K,
     }
@@ -641,6 +642,7 @@ pub mod quantized {
 
             let (block_size, type_size) = match dtype {
                 QuantizedDType::Q5_0 => (32, 22),
+                QuantizedDType::Q8_0 => (32, 34),
                 QuantizedDType::Q4K => (256, 144),
                 QuantizedDType::Q6K => (256, 210),
             };
@@ -666,6 +668,15 @@ pub mod quantized {
             )?;
             match dtype {
                 QuantizedDType::Q5_0 => crate::hip::qmatmul_t_q5_0_f32(
+                    op.weights,
+                    op.rhs.buffer(),
+                    &op.rhs_layout,
+                    &dst,
+                    op.batch_size,
+                    op.nrows,
+                    op.ncols,
+                )?,
+                QuantizedDType::Q8_0 => crate::hip::qmatmul_t_q8_0_f32(
                     op.weights,
                     op.rhs.buffer(),
                     &op.rhs_layout,

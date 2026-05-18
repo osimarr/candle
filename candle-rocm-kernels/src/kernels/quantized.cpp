@@ -3,7 +3,13 @@
 namespace {
 
 constexpr size_t QK5_0 = 32;
+constexpr size_t QK8_0 = 32;
 constexpr size_t QK_K = 256;
+
+struct BlockQ8_0 {
+    uint16_t d;
+    int8_t qs[QK8_0];
+};
 
 struct BlockQ5_0 {
     uint16_t d;
@@ -25,6 +31,7 @@ struct BlockQ6K {
     uint16_t d;
 };
 
+static_assert(sizeof(BlockQ8_0) == 34);
 static_assert(sizeof(BlockQ5_0) == 22);
 static_assert(sizeof(BlockQ4K) == 144);
 static_assert(sizeof(BlockQ6K) == 210);
@@ -59,6 +66,11 @@ inline bool is_contiguous(const DeviceLayout& layout) {
         expected_stride *= layout.dims[axis];
     }
     return true;
+}
+
+__device__ inline float dequant_q8_0(const BlockQ8_0* blocks, size_t inner) {
+    const BlockQ8_0& block = blocks[inner / QK8_0];
+    return f16_bits_to_f32(block.d) * static_cast<float>(block.qs[inner % QK8_0]);
 }
 
 __device__ inline float dequant_q5_0(const BlockQ5_0* blocks, size_t inner) {
@@ -176,6 +188,12 @@ struct DequantQ5_0 {
     }
 };
 
+struct DequantQ8_0 {
+    __device__ float operator()(const BlockQ8_0* blocks, size_t inner) const {
+        return dequant_q8_0(blocks, inner);
+    }
+};
+
 struct DequantQ4K {
     __device__ float operator()(const BlockQ4K* blocks, size_t inner) const {
         return dequant_q4k(blocks, inner);
@@ -234,6 +252,34 @@ int launch_qmatmul_t_f32(
 }
 
 } // namespace
+
+extern "C" int hip_qmatmul_t_q8_0_f32(
+    int ordinal,
+    const uint8_t* weights,
+    const float* rhs,
+    const size_t* rhs_dims,
+    const size_t* rhs_strides,
+    size_t rhs_rank,
+    size_t rhs_start_offset,
+    float* dst,
+    size_t batch_size,
+    size_t nrows,
+    size_t ncols) {
+    return launch_qmatmul_t_f32<BlockQ8_0, QK8_0>(
+        "qmatmul_t_q8_0_f32",
+        ordinal,
+        weights,
+        rhs,
+        rhs_dims,
+        rhs_strides,
+        rhs_rank,
+        rhs_start_offset,
+        dst,
+        batch_size,
+        nrows,
+        ncols,
+        DequantQ8_0{});
+}
 
 extern "C" int hip_qmatmul_t_q5_0_f32(
     int ordinal,

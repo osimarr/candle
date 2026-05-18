@@ -589,6 +589,19 @@ unsafe extern "C" {
         nrows: usize,
         ncols: usize,
     ) -> c_int;
+    fn hip_qmatmul_t_q8_0_f32(
+        ordinal: c_int,
+        weights: *const u8,
+        rhs: *const f32,
+        rhs_dims: *const usize,
+        rhs_strides: *const usize,
+        rhs_rank: usize,
+        rhs_start_offset: usize,
+        dst: *mut f32,
+        batch_size: usize,
+        nrows: usize,
+        ncols: usize,
+    ) -> c_int;
     fn hip_qmatmul_t_q4k_f32(
         ordinal: c_int,
         weights: *const u8,
@@ -2819,6 +2832,36 @@ pub(crate) fn qmatmul_t_q5_0_f32(
             )
         },
         "qmatmul_t_q5_0_f32",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn qmatmul_t_q8_0_f32(
+    weights: &Buffer,
+    rhs: &Buffer,
+    rhs_layout: &LayoutArg,
+    dst: &Buffer,
+    batch_size: usize,
+    nrows: usize,
+    ncols: usize,
+) -> Result<()> {
+    check(
+        unsafe {
+            hip_qmatmul_t_q8_0_f32(
+                ordinal_to_c_int(weights.device_ordinal())?,
+                weights.device_ptr().cast::<u8>(),
+                rhs.device_ptr().cast::<f32>(),
+                rhs_layout.dims().as_ptr(),
+                rhs_layout.stride().as_ptr(),
+                rhs_layout.dims().len(),
+                rhs_layout.start_offset(),
+                dst.device_ptr().cast::<f32>(),
+                batch_size,
+                nrows,
+                ncols,
+            )
+        },
+        "qmatmul_t_q8_0_f32",
     )
 }
 
