@@ -15,7 +15,6 @@ use candle_transformers::models::llava::{config::LLaVAConfig, LLaVA};
 use clap::Parser;
 use constants::*;
 use conversation::Conversation;
-use hf_hub::api::sync::Api;
 use image_processor::{process_image, ImageProcessor};
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -150,7 +149,7 @@ fn main() -> Result<()> {
     let mut args = Args::parse();
     let device = candle_examples::device(args.cpu)?;
     println!("Start loading model");
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let api = api.model(args.model_path.clone());
     let (llava_config, tokenizer, clip_vision_config, image_processor) = if args.hf {
         let config_filename = api.get("config.json")?;

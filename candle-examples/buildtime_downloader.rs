@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 
 pub fn download_model(model_and_revision: &str) -> Result<()> {
     let (model_id, revision) = match model_and_revision.split_once(":") {
@@ -8,7 +8,7 @@ pub fn download_model(model_and_revision: &str) -> Result<()> {
     };
     let repo = Repo::with_revision(model_id.to_string(), RepoType::Model, revision.to_string());
     let (config_filename, tokenizer_filename, weights_filename) = {
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let api = api.repo(repo);
         let config = api.get("config.json")?.to_string_lossy().to_string();
         let tokenizer = api.get("tokenizer.json")?.to_string_lossy().to_string();

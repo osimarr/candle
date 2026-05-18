@@ -8,7 +8,6 @@ use anyhow::Result;
 use candle::{DType, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use clap::{Parser, ValueEnum};
-use hf_hub::api::sync::Api;
 use serde::Deserialize;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -69,7 +68,7 @@ pub fn main() -> Result<()> {
         Which::SmolLM135M => ("HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-135M"),
     };
 
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_repo = api.model(model_id.to_string());
     let tokenizer_repo = api.model(tokenizer_id.to_string());
 

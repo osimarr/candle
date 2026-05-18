@@ -121,7 +121,7 @@ impl Args {
         let path = match &self.config {
             Some(config) => std::path::PathBuf::from(config),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let api = api.model("lmz/candle-yolo-v3".to_string());
                 api.get("yolo-v3.cfg")?
             }
@@ -133,7 +133,7 @@ impl Args {
         let path = match &self.model {
             Some(model) => std::path::PathBuf::from(model),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let api = api.model("lmz/candle-yolo-v3".to_string());
                 api.get("yolo-v3.safetensors")?
             }

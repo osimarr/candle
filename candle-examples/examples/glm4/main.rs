@@ -214,7 +214,7 @@ fn main() -> anyhow::Result<()> {
 
     let start = std::time::Instant::now();
     let api = match args.cache_path.as_ref() {
-        None => hf_hub::api::sync::Api::new()?,
+        None => hf_hub::api::sync::ApiBuilder::from_env().build()?,
         Some(path) => {
             hf_hub::api::sync::ApiBuilder::from_cache(hf_hub::Cache::new(path.to_string().into()))
                 .build()

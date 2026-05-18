@@ -70,7 +70,6 @@ struct Args {
 }
 
 pub fn main() -> anyhow::Result<()> {
-    use hf_hub::api::sync::Api;
     let args = Args::parse();
 
     let config = match (args.which, args.language_pair) {
@@ -107,7 +106,8 @@ pub fn main() -> anyhow::Result<()> {
                         anyhow::bail!("big is not supported for language pair {lp:?}")
                     }
                 };
-                Api::new()?
+                hf_hub::api::sync::ApiBuilder::from_env()
+                    .build()?
                     .model(tokenizer_default_repo.to_string())
                     .get(filename)?
             }
@@ -131,7 +131,8 @@ pub fn main() -> anyhow::Result<()> {
                         anyhow::bail!("big is not supported for language pair {lp:?}")
                     }
                 };
-                Api::new()?
+                hf_hub::api::sync::ApiBuilder::from_env()
+                    .build()?
                     .model(tokenizer_default_repo.to_string())
                     .get(filename)?
             }
@@ -145,7 +146,7 @@ pub fn main() -> anyhow::Result<()> {
         let model = match args.model {
             Some(model) => std::path::PathBuf::from(model),
             None => {
-                let api = Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let api = match (args.which, args.language_pair) {
                     (Which::Base, LanguagePair::FrEn) => api.repo(hf_hub::Repo::with_revision(
                         "Helsinki-NLP/opus-mt-fr-en".to_string(),

@@ -11,7 +11,7 @@ use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::Tokenizer;
 
 use candle_transformers::models::falcon::{Config, Falcon};
@@ -158,7 +158,7 @@ fn main() -> Result<()> {
 
     let device = candle_examples::device(args.cpu)?;
     let start = std::time::Instant::now();
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.repo(Repo::with_revision(
         args.model_id,
         RepoType::Model,

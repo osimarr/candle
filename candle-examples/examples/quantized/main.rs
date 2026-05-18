@@ -309,7 +309,7 @@ impl Args {
         let tokenizer_path = match &self.tokenizer {
             Some(config) => std::path::PathBuf::from(config),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let repo = self.which.tokenizer_repo();
                 let api = api.model(repo.to_string());
                 api.get("tokenizer.json")?
@@ -408,7 +408,7 @@ impl Args {
                 } else {
                     "main"
                 };
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 api.repo(hf_hub::Repo::with_revision(
                     repo.to_string(),
                     hf_hub::RepoType::Model,

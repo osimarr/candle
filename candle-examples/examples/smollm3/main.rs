@@ -14,7 +14,7 @@ use candle_examples::token_output_stream::TokenOutputStream;
 
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::Tokenizer;
 
 // Import both model implementations
@@ -227,7 +227,7 @@ impl Args {
         let tokenizer_path = match &self.tokenizer {
             Some(path) => std::path::PathBuf::from(path),
             None => {
-                let api = Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let api = api.model("HuggingFaceTB/SmolLM3-3B".to_string());
                 api.get("tokenizer.json")?
             }
@@ -248,7 +248,7 @@ fn load_quantized_model(args: &Args, device: &Device) -> Result<SmolLM3Model> {
         None => {
             let filename = args.quantization.filename_unsloth();
             let repo_id = "unsloth/SmolLM3-3B-GGUF";
-            let api = Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             println!(
                 "Downloading {} from {} (~{:.2}GB)...",
                 filename,
@@ -270,7 +270,7 @@ fn load_quantized_model(args: &Args, device: &Device) -> Result<SmolLM3Model> {
 }
 
 fn load_full_model(args: &Args, device: &Device) -> Result<SmolLM3Model> {
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match args.model {
         WhichModel::W3b => "HuggingFaceTB/SmolLM3-3B",
         WhichModel::W3bBase => "HuggingFaceTB/SmolLM3-3B-Base",

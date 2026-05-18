@@ -19,7 +19,8 @@ impl ClipWithTokenizer {
         max_position_embeddings: usize,
     ) -> Result<Self> {
         let clip = stable_diffusion::clip::ClipTextTransformer::new(vb, &config)?;
-        let path_buf = hf_hub::api::sync::Api::new()?
+        let path_buf = hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model(tokenizer_path.to_string())
             .get("tokenizer.json")?;
         let tokenizer = Tokenizer::from_file(path_buf.to_str().ok_or(E::msg(
@@ -82,7 +83,7 @@ struct T5WithTokenizer {
 
 impl T5WithTokenizer {
     fn new(vb: candle_nn::VarBuilder, max_position_embeddings: usize) -> Result<Self> {
-        let api = hf_hub::api::sync::Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let repo = api.repo(hf_hub::Repo::with_revision(
             "google/t5-v1_1-xxl".to_string(),
             hf_hub::RepoType::Model,

@@ -55,7 +55,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let model_file = match args.model {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api = api.model("vincent-espitalier/candle-eva2".into());
             api.get("eva02_base_patch14_448.mim_in22k_ft_in22k_in1k_adapted.safetensors")?
         }

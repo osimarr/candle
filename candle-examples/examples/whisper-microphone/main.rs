@@ -8,7 +8,7 @@ use anyhow::{Error as E, Result};
 use candle::{Device, IndexOp, Tensor};
 use candle_nn::{ops::softmax, VarBuilder};
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use rand::{distr::Distribution, SeedableRng};
 use tokenizers::Tokenizer;
 
@@ -514,7 +514,7 @@ pub fn main() -> Result<()> {
     };
 
     let (config_filename, tokenizer_filename, weights_filename) = {
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
         let (config, tokenizer, model) = if args.quantized {
             let ext = match args.model {

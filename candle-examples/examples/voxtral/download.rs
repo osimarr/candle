@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 
 /// # Errors
 ///
@@ -13,7 +13,7 @@ use hf_hub::{api::sync::Api, Repo, RepoType};
 pub fn model_files(model_id: &str) -> Result<((PathBuf, Vec<PathBuf>), PathBuf)> {
     let revision = "main";
 
-    let api = Api::new().unwrap();
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build().unwrap();
     let repo = api.repo(Repo::with_revision(
         model_id.to_string(),
         RepoType::Model,

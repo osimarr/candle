@@ -96,7 +96,7 @@ impl Args {
         let tokenizer_path = match &self.tokenizer {
             Some(config) => std::path::PathBuf::from(config),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let repo = match self.which {
                     Which::Q2k9b => "THUDM/GLM-4-9B-0414",
                     Which::Q2k32b => "THUDM/GLM-4-32B-0414",
@@ -136,7 +136,7 @@ impl Args {
                         "main",
                     ),
                 };
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 api.repo(hf_hub::Repo::with_revision(
                     repo.to_string(),
                     hf_hub::RepoType::Model,

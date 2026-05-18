@@ -8,7 +8,7 @@ use candle_transformers::models::xlm_roberta::{
     Config, XLMRobertaForMaskedLM, XLMRobertaForSequenceClassification,
 };
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::{PaddingParams, Tokenizer};
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -71,7 +71,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match &args.model_id {
         Some(model_id) => model_id.to_string(),
         None => match args.task {

@@ -13,7 +13,7 @@ use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use candle_transformers::models::granitemoehybrid as model;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use model::{GraniteMoeHybrid, GraniteMoeHybridCache, GraniteMoeHybridConfig};
 
 use std::{io::Write, path::Path};
@@ -151,7 +151,7 @@ fn main() -> Result<()> {
                 config,
             )
         } else {
-            let api = Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let revision = args.revision.clone().unwrap_or_else(|| "main".to_string());
             let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
 

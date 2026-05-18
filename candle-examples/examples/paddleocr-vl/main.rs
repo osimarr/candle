@@ -596,7 +596,7 @@ fn main() -> Result<()> {
 
     // Load model from HuggingFace
     println!("Loading model from {}...", args.model_id);
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.repo(hf_hub::Repo::with_revision(
         args.model_id.clone(),
         hf_hub::RepoType::Model,

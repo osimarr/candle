@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     };
     let cfg_scale = cfg_scale.unwrap_or(default_cfg_scale);
 
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let (mmdit_config, mut triple, vb) = if which.is_3_5() {
         let sai_repo_for_text_encoders = {
             let name = match which {

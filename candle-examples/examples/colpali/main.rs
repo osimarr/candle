@@ -4,7 +4,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::colpali::Model;
 use candle_transformers::models::{colpali, paligemma};
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use image::DynamicImage;
 use pdf2image::{RenderOptionsBuilder, PDF};
 use tokenizers::Tokenizer;
@@ -195,7 +195,7 @@ fn main() -> Result<()> {
         candle::utils::with_f16c()
     );
 
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match &args.model_id {
         Some(model_id) => model_id.to_string(),
         None => "vidore/colpali-v1.2-merged".to_string(),

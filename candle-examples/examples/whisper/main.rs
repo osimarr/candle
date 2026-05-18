@@ -16,7 +16,7 @@ use candle_nn::{
     VarBuilder,
 };
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::SeedableRng;
@@ -675,7 +675,7 @@ fn main() -> Result<()> {
     };
 
     let (config_filename, tokenizer_filename, weights_filename, input) = {
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let dataset = api.dataset("Narsil/candle-examples".to_string());
         let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
         let sample = if let Some(input) = args.input {

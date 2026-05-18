@@ -69,7 +69,7 @@ pub fn main() -> anyhow::Result<()> {
     let model_file = match args.model {
         None => {
             let model_name = args.which.model_filename();
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api = api.model(model_name);
             api.get("model.safetensors")?
         }

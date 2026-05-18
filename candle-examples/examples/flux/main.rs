@@ -86,7 +86,7 @@ fn run(args: Args) -> Result<()> {
         None
     };
 
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let bf_repo = {
         let name = match model {
             Model::Dev => "black-forest-labs/FLUX.1-dev",

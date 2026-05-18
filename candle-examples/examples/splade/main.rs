@@ -5,7 +5,7 @@ use candle::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{self, BertForMaskedLM, Config};
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::{PaddingParams, Tokenizer};
 
 #[derive(Parser, Debug)]
@@ -45,7 +45,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match &args.model_id {
         Some(model_id) => model_id.to_string(),
         None => "prithivida/Splade_PP_en_v1".to_string(),

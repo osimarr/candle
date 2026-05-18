@@ -61,7 +61,7 @@ fn get_vb_and_config(
     device: &Device,
 ) -> anyhow::Result<(VarBuilder<'_>, Config)> {
     println!("loading model {model_name} via huggingface hub");
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let api = api.model(model_name.clone());
     let model_file = api.get("model.safetensors")?;
     println!("model {model_name} downloaded and loaded");

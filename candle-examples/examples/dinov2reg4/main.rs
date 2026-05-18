@@ -45,7 +45,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let model_file = match args.model {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api =
                 api.model("vincent-espitalier/dino-v2-reg4-with-plantclef2024-weights".into());
             api.get(

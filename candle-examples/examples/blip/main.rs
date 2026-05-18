@@ -76,7 +76,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let model_file = match args.model {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             if args.quantized {
                 let api = api.model("lmz/candle-blip".to_string());
                 api.get("blip-image-captioning-large-q4k.gguf")?
@@ -93,7 +93,7 @@ pub fn main() -> anyhow::Result<()> {
     };
     let tokenizer = match args.tokenizer {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api = api.model("Salesforce/blip-image-captioning-large".to_string());
             api.get("tokenizer.json")?
         }

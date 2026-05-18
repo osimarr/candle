@@ -296,7 +296,7 @@ impl Args {
         let path = match &self.model {
             Some(model) => std::path::PathBuf::from(model),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let api = api.model("lmz/candle-yolo-v8".to_string());
                 let size = match self.which {
                     Which::N => "n",

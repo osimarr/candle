@@ -11,7 +11,7 @@ use anyhow::{Context, Error as E, Result};
 use candle::{Device, Tensor};
 use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
 
@@ -120,7 +120,7 @@ impl Args {
         revision: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf)> {
         let repo = Repo::with_revision(model_id.to_string(), RepoType::Model, revision.to_string());
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let api = api.repo(repo);
 
         let config = api.get("config.json")?;

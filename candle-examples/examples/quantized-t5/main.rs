@@ -12,7 +12,7 @@ use anyhow::{Error as E, Result};
 use candle::{Device, Tensor};
 use candle_transformers::generation::LogitsProcessor;
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, api::sync::ApiRepo, Repo, RepoType};
+use hf_hub::{api::sync::ApiRepo, Repo, RepoType};
 use tokenizers::Tokenizer;
 
 #[derive(Clone, Debug, Copy, ValueEnum)]
@@ -92,7 +92,7 @@ impl T5ModelBuilder {
         };
 
         let repo = Repo::with_revision(model_id, RepoType::Model, revision);
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let api = api.repo(repo);
         let config_filename = match &args.config_file {
             Some(filename) => Self::get_local_or_remote_file(filename, &api)?,

@@ -11,7 +11,7 @@ use candle_transformers::models::qwen2::{Config, Model};
 
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::{
     utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy},
     Tokenizer,
@@ -51,7 +51,7 @@ struct ConfigFiles {
 
 // Loading the model from the HuggingFace Hub. Network access is required.
 fn load_from_hub(model_id: &str, revision: &str) -> Result<ConfigFiles> {
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.repo(Repo::with_revision(
         model_id.to_string(),
         RepoType::Model,

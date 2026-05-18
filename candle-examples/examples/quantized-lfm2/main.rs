@@ -110,7 +110,7 @@ impl Args {
             Which::Lfm2_2_6BQ4KM => ("LiquidAI/LFM2-2.6B-GGUF", "LFM2-2.6B-Q4_K_M.gguf"),
             Which::Lfm2_2_6BQ8_0 => ("LiquidAI/LFM2-2.6B-GGUF", "LFM2-2.6B-Q8_0.gguf"),
         };
-        let api = hf_hub::api::sync::Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         api.repo(hf_hub::Repo::with_revision(
             repo.to_string(),
             hf_hub::RepoType::Model,
@@ -136,7 +136,7 @@ impl Args {
             Which::Lfm2_350MQ4KM | Which::Lfm2_350MQ8_0 => "LiquidAI/LFM2-350M",
             Which::Lfm2_2_6BQ4KM | Which::Lfm2_2_6BQ8_0 => "LiquidAI/LFM2-2.6B",
         };
-        let api = hf_hub::api::sync::Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let tokenizer_path = api
             .repo(hf_hub::Repo::with_revision(
                 tokenizer_repo.to_string(),

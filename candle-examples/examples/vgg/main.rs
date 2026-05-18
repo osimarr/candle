@@ -37,7 +37,7 @@ pub fn main() -> anyhow::Result<()> {
 
     println!("loaded image {image:?}");
 
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = match args.which {
         Which::Vgg13 => "timm/vgg13.tv_in1k",
         Which::Vgg16 => "timm/vgg16.tv_in1k",

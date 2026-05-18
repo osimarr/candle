@@ -18,7 +18,7 @@ use candle_transformers::models::rwkv_v7::{
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 
 const EOS_TOKEN_ID: u32 = 261;
 
@@ -622,7 +622,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.repo(Repo::with_revision(
         args.model_id
             .unwrap_or_else(|| args.which.model_id().to_string()),

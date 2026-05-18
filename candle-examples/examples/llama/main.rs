@@ -18,7 +18,7 @@ use clap::{Parser, ValueEnum};
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use std::io::Write;
 
 use candle_transformers::models::llama as model;
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
         None => DType::F16,
     };
     let (llama, tokenizer_filename, mut cache, config) = {
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let model_id = args.model_id.unwrap_or_else(|| {
             let str = match args.which {
                 Which::V1 => "Narsil/amall-7b",

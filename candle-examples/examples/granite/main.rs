@@ -12,7 +12,7 @@ use clap::{Parser, ValueEnum};
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use std::io::Write;
 
 use candle_transformers::models::granite as model;
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
         None => DType::F16,
     };
     let (granite, tokenizer_filename, mut cache, config) = {
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let model_id = args.model_id.unwrap_or_else(|| match args.model_type {
             GraniteModel::Granite7bInstruct => "ibm-granite/granite-7b-instruct".to_string(),
         });

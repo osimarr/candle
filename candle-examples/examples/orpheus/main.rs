@@ -158,7 +158,7 @@ struct Model {
 }
 
 fn load_snac(device: &Device) -> Result<SnacModel> {
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let m = api.model("hubertsiuzdak/snac_24khz".to_string());
     let config = m.get("config.json")?;
     let config: SnacConfig = serde_json::from_reader(std::fs::File::open(config)?)?;
@@ -172,7 +172,7 @@ fn load_snac(device: &Device) -> Result<SnacModel> {
 impl Model {
     fn load(args: Args) -> Result<Self> {
         let start = std::time::Instant::now();
-        let api = hf_hub::api::sync::Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let model_id = match args.model_id {
             Some(model_id) => model_id.to_string(),
             None => match args.which {

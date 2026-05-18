@@ -9,7 +9,6 @@ use candle::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::snac::{Config, Model};
 use clap::{Parser, ValueEnum};
-use hf_hub::api::sync::Api;
 
 mod audio_io;
 
@@ -91,14 +90,16 @@ fn main() -> Result<()> {
     let model_sample_rate = args.which.sample_rate();
     let config = match args.config {
         Some(c) => std::path::PathBuf::from(c),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model(args.which.config_repo().to_string())
             .get("config.json")?,
     };
     let config: Config = serde_json::from_slice(&std::fs::read(config)?)?;
     let model = match args.model {
         Some(model) => std::path::PathBuf::from(model),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model("lmz/candle-snac".to_string())
             .get(args.which.model_file())?,
     };

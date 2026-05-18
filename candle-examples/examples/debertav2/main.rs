@@ -16,7 +16,7 @@ use candle_transformers::models::debertav2::{Config as DebertaV2Config, DebertaV
 use candle_transformers::models::debertav2::{DebertaV2SeqClassificationModel, Id2Label};
 use candle_transformers::models::debertav2::{NERItem, TextClassificationItem};
 use clap::{ArgGroup, Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
 enum TaskType {
@@ -119,7 +119,7 @@ impl Args {
                         RepoType::Model,
                         self.revision.clone(),
                     );
-                    let api = Api::new()?;
+                    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                     let api = api.repo(repo);
                     let config = api.get("config.json")?;
                     let tokenizer = api.get("tokenizer.json")?;

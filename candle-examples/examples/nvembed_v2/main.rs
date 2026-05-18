@@ -9,7 +9,7 @@ use candle::{DType, IndexOp, Shape, Tensor, D};
 use candle_nn::VarBuilder;
 use candle_transformers::models::nvembed_v2::model::Model;
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::{PaddingDirection, PaddingParams, Tokenizer, TruncationParams};
 
 #[derive(Parser, Debug)]
@@ -49,7 +49,7 @@ impl Args {
             None => "nvidia/NV-Embed-v2".to_string(),
         };
 
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let repo = api.repo(Repo::new(model_name.to_string(), RepoType::Model));
 
         let model_files = match &self.model_files {

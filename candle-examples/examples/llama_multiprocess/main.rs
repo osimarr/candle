@@ -17,7 +17,7 @@ use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::llama::LlamaEosToks;
 use cudarc::driver::safe::CudaDevice;
 use cudarc::nccl::safe::{Comm, Id};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use std::io::Write;
 use std::rc::Rc;
 
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         bail!("comm file {comm_file:?} already exists, please remove it first")
     }
 
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match args.model_id {
         Some(model) => model,
         None => match args.which {

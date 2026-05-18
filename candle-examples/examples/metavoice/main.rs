@@ -15,7 +15,6 @@ use candle_transformers::models::quantized_metavoice::transformer as qtransforme
 
 use candle::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use hf_hub::api::sync::Api;
 use rand::{distr::Distribution, SeedableRng};
 
 pub const ENCODEC_NTOKENS: u32 = 1024;
@@ -109,7 +108,7 @@ fn main() -> Result<()> {
         candle::utils::with_f16c()
     );
     let device = candle_examples::device(args.cpu)?;
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.model("lmz/candle-metavoice".to_string());
     let first_stage_meta = match &args.first_stage_meta {
         Some(w) => std::path::PathBuf::from(w),
@@ -132,7 +131,8 @@ fn main() -> Result<()> {
     };
     let encodec_weights = match args.encodec_weights {
         Some(w) => std::path::PathBuf::from(w),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model("facebook/encodec_24khz".to_string())
             .get("model.safetensors")?,
     };

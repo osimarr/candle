@@ -90,7 +90,7 @@ impl Args {
         let tokenizer_path = match &self.tokenizer {
             Some(config) => std::path::PathBuf::from(config),
             None => {
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 let repo = "google/gemma-3-4b-it";
                 println!("DEBUG: Downloading tokenizer from {repo}");
                 let api = api.model(repo.to_string());
@@ -113,7 +113,7 @@ impl Args {
                         "gemma-3-4b-it-q4_0.gguf",
                     ),
                 };
-                let api = hf_hub::api::sync::Api::new()?;
+                let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
                 api.repo(hf_hub::Repo::with_revision(
                     repo.to_string(),
                     hf_hub::RepoType::Model,

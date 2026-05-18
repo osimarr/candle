@@ -13,7 +13,7 @@ use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use clap::{Parser, ValueEnum};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::Tokenizer;
 
 const DTYPE: DType = DType::F32;
@@ -125,7 +125,7 @@ impl T5ModelBuilder {
         };
 
         let repo = Repo::with_revision(model_id.clone(), RepoType::Model, revision);
-        let api = Api::new()?;
+        let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
         let repo = api.repo(repo);
         let config_filename = match &args.config_file {
             None => repo.get("config.json")?,

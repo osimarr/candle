@@ -15,7 +15,7 @@ use candle_transformers::models::stella_en_v5::{
 
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use hf_hub::{api::sync::Api, Repo};
+use hf_hub::Repo;
 use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer};
 
 struct Embedding {
@@ -313,7 +313,7 @@ fn main() -> Result<()> {
     );
 
     let start = std::time::Instant::now();
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let embed_dim = match args.embed_dim {
         Some(d) => d,
         None => EmbedDim::Dim1024,

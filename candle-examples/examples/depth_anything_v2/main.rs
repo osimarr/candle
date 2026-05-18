@@ -53,7 +53,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let dinov2_model_file = match args.dinov2_model {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api = api.model("lmz/candle-dino-v2".into());
             api.get("dinov2_vits14.safetensors")?
         }
@@ -67,7 +67,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let depth_anything_model_file = match args.depth_anything_v2_model {
         None => {
-            let api = hf_hub::api::sync::Api::new()?;
+            let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
             let api = api.model("jeroenvlek/depth-anything-v2-safetensors".into());
             api.get("depth_anything_v2_vits.safetensors")?
         }

@@ -18,7 +18,7 @@ use anyhow::{Error as E, Result};
 use candle::{DType, Tensor};
 use candle_nn::VarBuilder;
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 
 const DTYPE: DType = DType::F32;
 
@@ -51,7 +51,8 @@ fn main() -> Result<()> {
     let device = candle_examples::device(args.cpu)?;
     let tokenizer = match args.tokenizer {
         Some(tokenizer) => std::path::PathBuf::from(tokenizer),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model("facebook/musicgen-small".to_string())
             .get("tokenizer.json")?,
     };
@@ -63,7 +64,8 @@ fn main() -> Result<()> {
 
     let model = match args.model {
         Some(model) => std::path::PathBuf::from(model),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .repo(Repo::with_revision(
                 "facebook/musicgen-small".to_string(),
                 RepoType::Model,

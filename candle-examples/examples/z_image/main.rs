@@ -41,7 +41,6 @@ use candle_transformers::models::z_image::{
     ZImageTextEncoder, ZImageTransformer2DModel,
 };
 use clap::Parser;
-use hf_hub::api::sync::Api;
 use tokenizers::Tokenizer;
 
 /// Z-Image scheduler constants
@@ -154,7 +153,7 @@ fn run(args: Args) -> Result<()> {
     let dtype = device.bf16_default_to_f32();
 
     // Resolve model: use provided path or download from HuggingFace
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let repo = api.model(args.model.repo().to_string());
     let use_local = args.model_path.is_some();
     let model_path = args.model_path.map(std::path::PathBuf::from);

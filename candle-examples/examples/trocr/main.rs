@@ -66,7 +66,7 @@ struct Args {
 
 pub fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let api = hf_hub::api::sync::Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
 
     let mut tokenizer_dec = {
         let tokenizer_file = match args.tokenizer {

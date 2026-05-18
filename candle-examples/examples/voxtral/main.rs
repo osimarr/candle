@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use hf_hub::api::sync::Api;
 use model::VoxtralModel;
 
 mod download;
@@ -34,7 +33,7 @@ fn main() -> Result<()> {
 
     println!("Model loaded successfully on device: {:?}", model.device());
 
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let dataset = api.dataset("Narsil/candle-examples".to_string());
 
     let audio_file = if let Some(input) = args.input {

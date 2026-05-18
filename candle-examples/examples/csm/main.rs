@@ -11,7 +11,7 @@ use candle_transformers::models::csm::{Config, Model};
 
 use candle::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use tokenizers::Tokenizer;
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
     );
 
     let start = std::time::Instant::now();
-    let api = Api::new()?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
     let model_id = match args.model_id {
         Some(model_id) => model_id,
         None => {
@@ -154,7 +154,8 @@ fn main() -> Result<()> {
     };
     let mimi_filename = match args.mimi_weights {
         Some(model) => std::path::PathBuf::from(model),
-        None => Api::new()?
+        None => hf_hub::api::sync::ApiBuilder::from_env()
+            .build()?
             .model("kyutai/mimi".to_string())
             .get("model.safetensors")?,
     };
