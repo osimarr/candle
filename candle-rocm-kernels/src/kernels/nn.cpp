@@ -1,8 +1,35 @@
 #include "common.h"
 
+#include <cfloat>
 #include <cmath>
 
 namespace {
+
+__device__ inline float block_reduce_max(float value, float* partial) {
+    partial[threadIdx.x] = value;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] = fmaxf(partial[threadIdx.x], partial[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    return partial[0];
+}
+
+__device__ inline float block_reduce_sum(float value, float* partial) {
+    partial[threadIdx.x] = value;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    return partial[0];
+}
 
 __global__ void softmax_last_dim_f32_kernel(
     const float* src,
@@ -10,24 +37,30 @@ __global__ void softmax_last_dim_f32_kernel(
     float* dst,
     size_t rows,
     size_t cols) {
-    const size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.x;
     if (row >= rows) {
         return;
     }
     const float* src_row = src + start_offset + row * cols;
     float* dst_row = dst + row * cols;
-    float max_value = src_row[0];
-    for (size_t col = 1; col < cols; ++col) {
-        max_value = fmaxf(max_value, src_row[col]);
+
+    float local_max = -FLT_MAX;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        local_max = fmaxf(local_max, src_row[col]);
     }
-    float sum = 0.0f;
-    for (size_t col = 0; col < cols; ++col) {
+    __shared__ float partial[256];
+    const float max_value = block_reduce_max(local_max, partial);
+
+    float local_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const float value = expf(src_row[col] - max_value);
         dst_row[col] = value;
-        sum += value;
+        local_sum += value;
     }
-    for (size_t col = 0; col < cols; ++col) {
-        dst_row[col] /= sum;
+    const float sum = block_reduce_sum(local_sum, partial);
+    const float inv_sum = 1.0f / sum;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        dst_row[col] *= inv_sum;
     }
 }
 
@@ -37,23 +70,29 @@ __global__ void softmax_last_dim_bf16_kernel(
     uint16_t* dst,
     size_t rows,
     size_t cols) {
-    const size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.x;
     if (row >= rows) {
         return;
     }
     const uint16_t* src_row = src + start_offset + row * cols;
     uint16_t* dst_row = dst + row * cols;
-    float max_value = bf16_bits_to_f32(src_row[0]);
-    for (size_t col = 1; col < cols; ++col) {
-        max_value = fmaxf(max_value, bf16_bits_to_f32(src_row[col]));
+
+    float local_max = -FLT_MAX;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        local_max = fmaxf(local_max, bf16_bits_to_f32(src_row[col]));
     }
-    float sum = 0.0f;
-    for (size_t col = 0; col < cols; ++col) {
+    __shared__ float partial[256];
+    const float max_value = block_reduce_max(local_max, partial);
+
+    float local_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const float value = expf(bf16_bits_to_f32(src_row[col]) - max_value);
-        sum += value;
+        local_sum += value;
     }
-    for (size_t col = 0; col < cols; ++col) {
-        const float value = expf(bf16_bits_to_f32(src_row[col]) - max_value) / sum;
+    const float sum = block_reduce_sum(local_sum, partial);
+    const float inv_sum = 1.0f / sum;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        const float value = expf(bf16_bits_to_f32(src_row[col]) - max_value) * inv_sum;
         dst_row[col] = f32_to_bf16_bits(value);
     }
 }
@@ -64,23 +103,29 @@ __global__ void softmax_last_dim_f8e4m3_kernel(
     uint8_t* dst,
     size_t rows,
     size_t cols) {
-    const size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.x;
     if (row >= rows) {
         return;
     }
     const uint8_t* src_row = src + start_offset + row * cols;
     uint8_t* dst_row = dst + row * cols;
-    float max_value = f8e4m3_bits_to_f32(src_row[0]);
-    for (size_t col = 1; col < cols; ++col) {
-        max_value = fmaxf(max_value, f8e4m3_bits_to_f32(src_row[col]));
+
+    float local_max = -FLT_MAX;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        local_max = fmaxf(local_max, f8e4m3_bits_to_f32(src_row[col]));
     }
-    float sum = 0.0f;
-    for (size_t col = 0; col < cols; ++col) {
+    __shared__ float partial[256];
+    const float max_value = block_reduce_max(local_max, partial);
+
+    float local_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const float value = expf(f8e4m3_bits_to_f32(src_row[col]) - max_value);
-        sum += value;
+        local_sum += value;
     }
-    for (size_t col = 0; col < cols; ++col) {
-        const float value = expf(f8e4m3_bits_to_f32(src_row[col]) - max_value) / sum;
+    const float sum = block_reduce_sum(local_sum, partial);
+    const float inv_sum = 1.0f / sum;
+    for (size_t col = threadIdx.x; col < cols; col += blockDim.x) {
+        const float value = expf(f8e4m3_bits_to_f32(src_row[col]) - max_value) * inv_sum;
         dst_row[col] = f32_to_f8e4m3_bits(value);
     }
 }
@@ -461,15 +506,18 @@ extern "C" int hip_softmax_last_dim_f32(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d_async(
-        "softmax_last_dim_f32",
-        rows,
+    hipLaunchKernelGGL(
         softmax_last_dim_f32_kernel,
+        dim3(static_cast<unsigned int>(rows)),
+        dim3(256),
+        0,
+        0,
         src,
         start_offset,
         dst,
         rows,
         cols);
+    return check_last_launch_error("softmax_last_dim_f32");
 }
 
 extern "C" int hip_softmax_last_dim_bf16(
@@ -483,15 +531,18 @@ extern "C" int hip_softmax_last_dim_bf16(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d_async(
-        "softmax_last_dim_bf16",
-        rows,
+    hipLaunchKernelGGL(
         softmax_last_dim_bf16_kernel,
+        dim3(static_cast<unsigned int>(rows)),
+        dim3(256),
+        0,
+        0,
         src,
         start_offset,
         dst,
         rows,
         cols);
+    return check_last_launch_error("softmax_last_dim_bf16");
 }
 
 extern "C" int hip_rms_norm_f32(
@@ -710,15 +761,18 @@ extern "C" int hip_softmax_last_dim_f8e4m3(
     if (rc != 0 || rows == 0 || cols == 0) {
         return rc;
     }
-    return launch_1d_async(
-        "softmax_last_dim_f8e4m3",
-        rows,
+    hipLaunchKernelGGL(
         softmax_last_dim_f8e4m3_kernel,
+        dim3(static_cast<unsigned int>(rows)),
+        dim3(256),
+        0,
+        0,
         src,
         start_offset,
         dst,
         rows,
         cols);
+    return check_last_launch_error("softmax_last_dim_f8e4m3");
 }
 
 extern "C" int hip_rms_norm_f8e4m3(
