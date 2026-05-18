@@ -239,6 +239,36 @@ unsafe extern "C" {
         value: u32,
         elem_count: usize,
     ) -> c_int;
+    fn hip_const_set_i16(
+        ordinal: c_int,
+        dst: *mut i16,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        value: i16,
+        elem_count: usize,
+    ) -> c_int;
+    fn hip_const_set_i32(
+        ordinal: c_int,
+        dst: *mut i32,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        value: i32,
+        elem_count: usize,
+    ) -> c_int;
+    fn hip_const_set_i64(
+        ordinal: c_int,
+        dst: *mut i64,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        value: i64,
+        elem_count: usize,
+    ) -> c_int;
     fn hip_const_set_bf16(
         ordinal: c_int,
         dst: *mut u16,
@@ -247,6 +277,26 @@ unsafe extern "C" {
         rank: usize,
         start_offset: usize,
         value: u16,
+        elem_count: usize,
+    ) -> c_int;
+    fn hip_const_set_f16(
+        ordinal: c_int,
+        dst: *mut u16,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        value: u16,
+        elem_count: usize,
+    ) -> c_int;
+    fn hip_const_set_f64(
+        ordinal: c_int,
+        dst: *mut f64,
+        dims: *const usize,
+        strides: *const usize,
+        rank: usize,
+        start_offset: usize,
+        value: f64,
         elem_count: usize,
     ) -> c_int;
     fn hip_const_set_f8e4m3(
@@ -1981,6 +2031,60 @@ pub(crate) fn const_set_u32(dst: &Buffer, layout: &LayoutArg, value: u32) -> Res
     )
 }
 
+pub(crate) fn const_set_i16(dst: &Buffer, layout: &LayoutArg, value: i16) -> Result<()> {
+    check(
+        unsafe {
+            hip_const_set_i16(
+                ordinal_to_c_int(dst.device_ordinal())?,
+                dst.device_ptr().cast::<i16>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                value,
+                layout.elem_count(),
+            )
+        },
+        "const_set_i16",
+    )
+}
+
+pub(crate) fn const_set_i32(dst: &Buffer, layout: &LayoutArg, value: i32) -> Result<()> {
+    check(
+        unsafe {
+            hip_const_set_i32(
+                ordinal_to_c_int(dst.device_ordinal())?,
+                dst.device_ptr().cast::<i32>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                value,
+                layout.elem_count(),
+            )
+        },
+        "const_set_i32",
+    )
+}
+
+pub(crate) fn const_set_i64(dst: &Buffer, layout: &LayoutArg, value: i64) -> Result<()> {
+    check(
+        unsafe {
+            hip_const_set_i64(
+                ordinal_to_c_int(dst.device_ordinal())?,
+                dst.device_ptr().cast::<i64>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                value,
+                layout.elem_count(),
+            )
+        },
+        "const_set_i64",
+    )
+}
+
 pub(crate) fn const_set_bf16(dst: &Buffer, layout: &LayoutArg, value: u16) -> Result<()> {
     check(
         unsafe {
@@ -1996,6 +2100,42 @@ pub(crate) fn const_set_bf16(dst: &Buffer, layout: &LayoutArg, value: u16) -> Re
             )
         },
         "const_set_bf16",
+    )
+}
+
+pub(crate) fn const_set_f16(dst: &Buffer, layout: &LayoutArg, value: u16) -> Result<()> {
+    check(
+        unsafe {
+            hip_const_set_f16(
+                ordinal_to_c_int(dst.device_ordinal())?,
+                dst.device_ptr().cast::<u16>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                value,
+                layout.elem_count(),
+            )
+        },
+        "const_set_f16",
+    )
+}
+
+pub(crate) fn const_set_f64(dst: &Buffer, layout: &LayoutArg, value: f64) -> Result<()> {
+    check(
+        unsafe {
+            hip_const_set_f64(
+                ordinal_to_c_int(dst.device_ordinal())?,
+                dst.device_ptr().cast::<f64>(),
+                layout.dims().as_ptr(),
+                layout.stride().as_ptr(),
+                layout.dims().len(),
+                layout.start_offset(),
+                value,
+                layout.elem_count(),
+            )
+        },
+        "const_set_f64",
     )
 }
 

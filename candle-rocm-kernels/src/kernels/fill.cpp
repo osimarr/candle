@@ -86,6 +86,42 @@ extern "C" int hip_const_set_u32(
     return const_set("const_set_u32", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
 }
 
+extern "C" int hip_const_set_i16(
+    int ordinal,
+    int16_t* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    int16_t value,
+    size_t elem_count) {
+    return const_set("const_set_i16", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}
+
+extern "C" int hip_const_set_i32(
+    int ordinal,
+    int32_t* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    int32_t value,
+    size_t elem_count) {
+    return const_set("const_set_i32", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}
+
+extern "C" int hip_const_set_i64(
+    int ordinal,
+    int64_t* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    int64_t value,
+    size_t elem_count) {
+    return const_set("const_set_i64", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}
+
 extern "C" int hip_const_set_bf16(
     int ordinal,
     uint16_t* dst,
@@ -96,6 +132,30 @@ extern "C" int hip_const_set_bf16(
     uint16_t value,
     size_t elem_count) {
     return const_set("const_set_bf16", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}
+
+extern "C" int hip_const_set_f16(
+    int ordinal,
+    uint16_t* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    uint16_t value,
+    size_t elem_count) {
+    return const_set("const_set_f16", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
+}
+
+extern "C" int hip_const_set_f64(
+    int ordinal,
+    double* dst,
+    const size_t* dims,
+    const size_t* strides,
+    size_t rank,
+    size_t start_offset,
+    double value,
+    size_t elem_count) {
+    return const_set("const_set_f64", ordinal, dst, dims, strides, rank, start_offset, value, elem_count);
 }
 
 extern "C" int hip_const_set_f8e4m3(

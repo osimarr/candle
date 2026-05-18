@@ -16,6 +16,7 @@ fn main() -> Result<()> {
     run_kernel_ops_for_dtype!(&device, DType::F32, Some(GgmlDType::F32));
     run_kernel_ops_for_dtype!(&device, DType::F16, Some(GgmlDType::F16));
     run_kernel_ops_for_dtype!(&device, DType::BF16, Some(GgmlDType::BF16));
+    run_kernel_ops_for_dtype!(&device, DType::I64, None);
     run_kernel_ops_for_dtype!(&device, DType::F8E4M3, None);
 
     device.synchronize()?;
@@ -29,7 +30,11 @@ fn run_dtype_kernel_ops(
 ) -> Result<()> {
     println!("dtype {dtype:?}");
     run_device_ops(device, dtype)?;
-    run_tensor_ops(device, dtype)?;
+    if dtype == DType::I64 {
+        run_i64_tensor_ops(device)?;
+    } else {
+        run_tensor_ops(device, dtype)?;
+    }
     run_copy_ops(device, dtype)?;
     run_quantized_ops(device, dtype, ggml_dtype)?;
 
@@ -154,6 +159,58 @@ fn run_tensor_ops(device: &Device, dtype: DType) -> Result<()> {
     consume("matmul", &lhs.matmul(&rhs)?)?;
 
     run_image_and_conv_ops(device, dtype)?;
+    Ok(())
+}
+
+fn run_i64_tensor_ops(device: &Device) -> Result<()> {
+    let x = i64_tensor(&[1, 2, 3, 4], (2, 2), device, "x")?;
+
+    consume("try_clone/contiguous", &x.t()?.contiguous()?)?;
+    consume("binary", &(&x + &x)?)?;
+
+    let cmp_rhs = i64_tensor(&[2, 2, 2, 2], (2, 2), device, "cmp rhs")?;
+    consume("cmp", &x.gt(&cmp_rhs)?)?;
+
+    consume("reduce_sum", &x.sum_keepdim(1)?)?;
+    consume("reduce_max", &x.max_keepdim(0)?)?;
+    consume("argsort", &x.arg_sort_last_dim(true)?)?;
+
+    consume("to_dtype_f32", &x.to_dtype(DType::F32)?)?;
+    consume(
+        "to_dtype_roundtrip",
+        &x.to_dtype(DType::F32)?.to_dtype(DType::I64)?,
+    )?;
+
+    let mask = Tensor::new(&[[1u8, 0], [0, 1]], device)?;
+    let on_true = i64_tensor(&[10, 20, 30, 40], (2, 2), device, "where true")?;
+    let on_false = i64_tensor(&[1, 2, 3, 4], (2, 2), device, "where false")?;
+    consume("where", &mask.where_cond(&on_true, &on_false)?)?;
+
+    let ids = Tensor::new(&[1u32, 0], device)?;
+    consume("index_select", &x.index_select(&ids, 0)?)?;
+
+    let gather_src = i64_tensor(
+        &[10, 20, 30, 40, 50, 60],
+        (2, 3),
+        device,
+        "gather src",
+    )?;
+    let gather_ids = Tensor::new(&[[2u32, 0], [1, 2]], device)?;
+    consume("gather", &gather_src.gather(&gather_ids, 1)?)?;
+
+    let add_src = i64_tensor(&[2, 3, 4, 5], (2, 2), device, "index add src")?;
+    consume("index_add", &x.index_add(&ids, &add_src, 1)?)?;
+
+    let scatter_ids = Tensor::new(&[[1u32, 0], [0, 1]], device)?;
+    consume(
+        "scatter_set",
+        &Tensor::zeros((2, 2), DType::I64, device)?.scatter(&scatter_ids, &add_src, 1)?,
+    )?;
+    consume(
+        "scatter_add",
+        &Tensor::zeros((2, 2), DType::I64, device)?.scatter_add(&scatter_ids, &add_src, 1)?,
+    )?;
+
     Ok(())
 }
 
@@ -343,6 +400,17 @@ fn tensor<S: Into<Shape>>(
     Ok(tensor)
 }
 
+fn i64_tensor<S: Into<Shape>>(
+    data: &[i64],
+    shape: S,
+    device: &Device,
+    name: &'static str,
+) -> Result<Tensor> {
+    let tensor = Tensor::from_slice(data, shape, device)?;
+    consume(name, &tensor)?;
+    Ok(tensor)
+}
+
 fn consume(name: &str, tensor: &Tensor) -> Result<()> {
     if !tensor.device().is_rocm() {
         candle::bail!("{name} left the ROCm device: {:?}", tensor.device())
@@ -374,7 +442,10 @@ fn supports_random(dtype: DType) -> bool {
 }
 
 fn supports_const_set(dtype: DType) -> bool {
-    matches!(dtype, DType::F32 | DType::BF16 | DType::F8E4M3)
+    matches!(
+        dtype,
+        DType::F32 | DType::BF16 | DType::I64 | DType::F8E4M3
+    )
 }
 
 fn supports_nn_callbacks(dtype: DType) -> bool {

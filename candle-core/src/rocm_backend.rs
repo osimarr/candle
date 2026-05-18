@@ -684,9 +684,13 @@ fn kernel_scalar(scalar: crate::scalar::Scalar) -> Result<kernels::KernelScalar>
         crate::scalar::Scalar::F32(value) => Ok(kernels::KernelScalar::F32(value)),
         crate::scalar::Scalar::U8(value) => Ok(kernels::KernelScalar::U8(value)),
         crate::scalar::Scalar::U32(value) => Ok(kernels::KernelScalar::U32(value)),
+        crate::scalar::Scalar::I16(value) => Ok(kernels::KernelScalar::I16(value)),
+        crate::scalar::Scalar::I32(value) => Ok(kernels::KernelScalar::I32(value)),
+        crate::scalar::Scalar::I64(value) => Ok(kernels::KernelScalar::I64(value)),
         crate::scalar::Scalar::BF16(value) => Ok(kernels::KernelScalar::BF16(value.to_bits())),
+        crate::scalar::Scalar::F16(value) => Ok(kernels::KernelScalar::F16(value.to_bits())),
+        crate::scalar::Scalar::F64(value) => Ok(kernels::KernelScalar::F64(value)),
         crate::scalar::Scalar::F8E4M3(value) => Ok(kernels::KernelScalar::F8E4M3(value.to_bits())),
-        scalar => Err(Error::UnsupportedDTypeForOp(scalar.dtype(), "const_set").bt()),
     }
 }
 

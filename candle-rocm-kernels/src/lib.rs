@@ -88,7 +88,12 @@ pub enum KernelScalar {
     F32(f32),
     U8(u8),
     U32(u32),
+    I16(i16),
+    I32(i32),
+    I64(i64),
     BF16(u16),
+    F16(u16),
+    F64(f64),
     F8E4M3(u8),
 }
 
@@ -98,7 +103,12 @@ impl KernelScalar {
             Self::F32(_) => KernelDType::F32,
             Self::U8(_) => KernelDType::U8,
             Self::U32(_) => KernelDType::U32,
+            Self::I16(_) => KernelDType::I16,
+            Self::I32(_) => KernelDType::I32,
+            Self::I64(_) => KernelDType::I64,
             Self::BF16(_) => KernelDType::BF16,
+            Self::F16(_) => KernelDType::F16,
+            Self::F64(_) => KernelDType::F64,
             Self::F8E4M3(_) => KernelDType::F8E4M3,
         }
     }
@@ -3040,8 +3050,23 @@ pub mod tensor {
                 KernelScalar::U32(value) => {
                     crate::hip::const_set_u32(op.dst.buffer(), layout, value)?;
                 }
+                KernelScalar::I16(value) => {
+                    crate::hip::const_set_i16(op.dst.buffer(), layout, value)?;
+                }
+                KernelScalar::I32(value) => {
+                    crate::hip::const_set_i32(op.dst.buffer(), layout, value)?;
+                }
+                KernelScalar::I64(value) => {
+                    crate::hip::const_set_i64(op.dst.buffer(), layout, value)?;
+                }
                 KernelScalar::BF16(value) => {
                     crate::hip::const_set_bf16(op.dst.buffer(), layout, value)?;
+                }
+                KernelScalar::F16(value) => {
+                    crate::hip::const_set_f16(op.dst.buffer(), layout, value)?;
+                }
+                KernelScalar::F64(value) => {
+                    crate::hip::const_set_f64(op.dst.buffer(), layout, value)?;
                 }
                 KernelScalar::F8E4M3(value) => {
                     crate::hip::const_set_f8e4m3(op.dst.buffer(), layout, value)?;
@@ -3051,32 +3076,61 @@ pub mod tensor {
         }
         #[cfg(not(hip_runtime))]
         {
-            match scalar {
-                KernelScalar::F32(value) => {
-                    let mut values = read_f32(&op.dst)?;
-                    for storage_index in layout.storage_indices() {
-                        values[storage_index] = value;
-                    }
-                    op.dst.buffer().write_all(&f32s_to_bytes(&values))
-                }
-                KernelScalar::U8(value) => {
-                    let mut values = vec![0; op.dst.buffer().size_in_bytes()];
-                    op.dst.buffer().read_all(&mut values)?;
-                    for storage_index in layout.storage_indices() {
-                        values[storage_index] = value;
-                    }
-                    op.dst.buffer().write_all(&values)
-                }
-                KernelScalar::U32(value) => {
-                    let mut values = read_u32(&op.dst)?;
-                    for storage_index in layout.storage_indices() {
-                        values[storage_index] = value;
-                    }
-                    op.dst.buffer().write_all(&u32s_to_bytes(&values))
-                }
-                KernelScalar::BF16(_) => Err(RocmError::NotImplemented("const_set bf16 host")),
-                KernelScalar::F8E4M3(_) => Err(RocmError::NotImplemented("const_set f8e4m3 host")),
+            const_set_host(&op.dst, layout, scalar)
+        }
+    }
+
+    #[cfg(not(hip_runtime))]
+    fn const_set_host(
+        dst: &TensorArg,
+        layout: &LayoutArg,
+        scalar: KernelScalar,
+    ) -> crate::Result<()> {
+        let elem_size = scalar
+            .dtype()
+            .size_in_bytes()
+            .ok_or(RocmError::UnsupportedDType {
+                dtype: scalar.dtype(),
+                op: "const_set",
+            })?;
+        let value = scalar_to_ne_bytes(scalar);
+        if value.len() != elem_size {
+            return Err(RocmError::BufferOutOfBounds {
+                buffer_bytes: value.len(),
+                offset: 0,
+                requested: elem_size,
+            });
+        }
+        let mut bytes = vec![0; dst.buffer().size_in_bytes()];
+        dst.buffer().read_all(&mut bytes)?;
+        for storage_index in layout.storage_indices() {
+            let offset = storage_index * elem_size;
+            let end = offset + elem_size;
+            if end > bytes.len() {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: bytes.len(),
+                    offset,
+                    requested: elem_size,
+                });
             }
+            bytes[offset..end].copy_from_slice(&value);
+        }
+        dst.buffer().write_all(&bytes)
+    }
+
+    #[cfg(not(hip_runtime))]
+    fn scalar_to_ne_bytes(scalar: KernelScalar) -> Vec<u8> {
+        match scalar {
+            KernelScalar::F32(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::U8(value) => vec![value],
+            KernelScalar::U32(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::I16(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::I32(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::I64(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::BF16(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::F16(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::F64(value) => value.to_ne_bytes().to_vec(),
+            KernelScalar::F8E4M3(value) => vec![value],
         }
     }
 
@@ -3414,22 +3468,6 @@ pub mod tensor {
             .collect())
     }
 
-    #[cfg(not(hip_runtime))]
-    fn read_u32(arg: &TensorArg) -> crate::Result<Vec<u32>> {
-        if arg.dtype() != KernelDType::U32 {
-            return Err(RocmError::UnsupportedDType {
-                dtype: arg.dtype(),
-                op: "read_u32",
-            });
-        }
-        let mut bytes = vec![0; arg.buffer().size_in_bytes()];
-        arg.buffer().read_all(&mut bytes)?;
-        Ok(bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()))
-            .collect())
-    }
-
     fn write_f32_output(
         src: &Buffer,
         output: TensorOutput,
@@ -3457,14 +3495,6 @@ pub mod tensor {
             .collect()
     }
 
-    #[cfg(not(hip_runtime))]
-    fn u32s_to_bytes(values: &[u32]) -> Vec<u8> {
-        values
-            .iter()
-            .flat_map(|value| value.to_ne_bytes())
-            .collect()
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -3479,6 +3509,25 @@ pub mod tensor {
         fn buffer_to_f32(buffer: &Buffer) -> Vec<f32> {
             let arg = TensorArg::new(buffer, KernelDType::F32, buffer.size_in_bytes() / 4).unwrap();
             read_f32(&arg).unwrap()
+        }
+
+        fn i64_arg(device: &Device, values: &[i64]) -> (Buffer, TensorArg) {
+            let bytes = values
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .collect::<Vec<_>>();
+            let buffer = device.copy_from_host(&bytes).unwrap();
+            let arg = TensorArg::new(&buffer, KernelDType::I64, values.len()).unwrap();
+            (buffer, arg)
+        }
+
+        fn buffer_to_i64(buffer: &Buffer) -> Vec<i64> {
+            let mut bytes = vec![0; buffer.size_in_bytes()];
+            buffer.read_all(&mut bytes).unwrap();
+            bytes
+                .chunks_exact(8)
+                .map(|chunk| i64::from_ne_bytes(chunk.try_into().unwrap()))
+                .collect()
         }
 
         #[test]
@@ -3527,6 +3576,21 @@ pub mod tensor {
 
             call_const_set::<RocmError, _>(op, || unreachable!()).unwrap();
             assert_eq!(buffer_to_f32(&buffer), vec![0., 5., 0., 5.]);
+        }
+
+        #[test]
+        fn const_set_updates_i64_destination() {
+            let device = Device::new(0).unwrap();
+            let (buffer, dst) = i64_arg(&device, &[0, 0, 0, 0]);
+            let op = InplaceOp1 {
+                name: "const_set",
+                dst,
+                dst_layout: Some(LayoutArg::new(vec![2], vec![2], 1).unwrap()),
+                scalar: Some(KernelScalar::I64(-7)),
+            };
+
+            call_const_set::<RocmError, _>(op, || unreachable!()).unwrap();
+            assert_eq!(buffer_to_i64(&buffer), vec![0, -7, 0, -7]);
         }
     }
 }
