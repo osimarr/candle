@@ -509,6 +509,23 @@ pub mod quantized {
         pub ncols: usize,
     }
 
+    #[derive(Clone, Debug)]
+    pub struct MoeGemmGgufOp<'a> {
+        pub name: &'static str,
+        pub device: &'a Device,
+        pub weights: &'a Buffer,
+        pub input: TensorArg,
+        pub sorted_token_ids: TensorArg,
+        pub expert_ids: TensorArg,
+        pub topk_weights: Option<TensorArg>,
+        pub output: TensorOutput,
+        pub num_experts: usize,
+        pub topk: usize,
+        pub size_m: usize,
+        pub size_n: usize,
+        pub size_k: usize,
+    }
+
     pub fn call_zeros<T, E, F>(op: QuantizedOp<'_>, fallback: F) -> std::result::Result<T, E>
     where
         F: FnOnce() -> std::result::Result<T, E>,
@@ -703,6 +720,182 @@ pub mod quantized {
                     op.nrows,
                     op.ncols,
                 )?,
+            }
+            Ok(Some(dst))
+        }
+    }
+
+    pub fn try_moe_gemm_gguf(
+        dtype: QuantizedDType,
+        op: &MoeGemmGgufOp<'_>,
+    ) -> crate::Result<Option<Buffer>> {
+        #[cfg(not(hip_runtime))]
+        {
+            let _ = (dtype, op);
+            Ok(None)
+        }
+        #[cfg(hip_runtime)]
+        {
+            if !matches!(
+                dtype,
+                QuantizedDType::Q8_0 | QuantizedDType::Q4K | QuantizedDType::Q6K
+            ) {
+                return Ok(None);
+            }
+            if op.input.dtype() != KernelDType::F32
+                || op.sorted_token_ids.dtype() != KernelDType::U32
+                || op.expert_ids.dtype() != KernelDType::U32
+                || op.output.dtype() != KernelDType::F32
+            {
+                return Ok(None);
+            }
+            if op
+                .topk_weights
+                .as_ref()
+                .is_some_and(|weights| weights.dtype() != KernelDType::F32)
+            {
+                return Ok(None);
+            }
+
+            op.weights.check_device(op.device.ordinal(), op.name)?;
+            op.input
+                .buffer()
+                .check_device(op.device.ordinal(), op.name)?;
+            op.sorted_token_ids
+                .buffer()
+                .check_device(op.device.ordinal(), op.name)?;
+            op.expert_ids
+                .buffer()
+                .check_device(op.device.ordinal(), op.name)?;
+            if let Some(topk_weights) = &op.topk_weights {
+                topk_weights
+                    .buffer()
+                    .check_device(op.device.ordinal(), op.name)?;
+            }
+
+            if op.topk == 0 || op.size_m == 0 || op.size_n == 0 || op.size_k == 0 {
+                return Err(RocmError::Runtime(format!(
+                    "invalid GGUF MoE shape for {}: topk {}, M {}, N {}, K {}",
+                    op.name, op.topk, op.size_m, op.size_n, op.size_k
+                )));
+            }
+            let (block_size, type_size) = match dtype {
+                QuantizedDType::Q8_0 => (32, 34),
+                QuantizedDType::Q4K => (256, 144),
+                QuantizedDType::Q6K => (256, 210),
+                QuantizedDType::Q5_0 => unreachable!(),
+            };
+            if !op.size_k.is_multiple_of(block_size) {
+                return Err(RocmError::Runtime(format!(
+                    "invalid GGUF MoE shape for {}: K {} is not divisible by block size {}",
+                    op.name, op.size_k, block_size
+                )));
+            }
+            let input_rows = if op.topk_weights.is_some() {
+                op.size_m
+            } else {
+                if !op.size_m.is_multiple_of(op.topk) {
+                    return Err(RocmError::Runtime(format!(
+                        "invalid GGUF MoE shape for {}: M {} is not divisible by topk {}",
+                        op.name, op.size_m, op.topk
+                    )));
+                }
+                op.size_m / op.topk
+            };
+            let expected_input = input_rows * op.size_k;
+            if op.input.elem_count() != expected_input {
+                return Err(RocmError::Runtime(format!(
+                    "invalid GGUF MoE input for {}: expected {} elems, got {}",
+                    op.name,
+                    expected_input,
+                    op.input.elem_count()
+                )));
+            }
+            if op.sorted_token_ids.elem_count() != op.size_m
+                || op.expert_ids.elem_count() != op.size_m
+            {
+                return Err(RocmError::Runtime(format!(
+                    "invalid GGUF MoE routing for {}: expected {} elems, got sorted {} experts {}",
+                    op.name,
+                    op.size_m,
+                    op.sorted_token_ids.elem_count(),
+                    op.expert_ids.elem_count()
+                )));
+            }
+            if let Some(topk_weights) = &op.topk_weights {
+                if topk_weights.elem_count() != op.size_m {
+                    return Err(RocmError::Runtime(format!(
+                        "invalid GGUF MoE topk weights for {}: expected {} elems, got {}",
+                        op.name,
+                        op.size_m,
+                        topk_weights.elem_count()
+                    )));
+                }
+            }
+            if op.output.elem_count() != op.size_m * op.size_n {
+                return Err(RocmError::Runtime(format!(
+                    "invalid GGUF MoE output for {}: expected {} elems, got {}",
+                    op.name,
+                    op.size_m * op.size_n,
+                    op.output.elem_count()
+                )));
+            }
+            let expected_weights =
+                op.num_experts * op.size_n * (op.size_k / block_size) * type_size;
+            if op.weights.size_in_bytes() != expected_weights {
+                return Err(RocmError::BufferOutOfBounds {
+                    buffer_bytes: op.weights.size_in_bytes(),
+                    offset: 0,
+                    requested: expected_weights,
+                });
+            }
+
+            let dst = op.device.allocate(
+                op.output
+                    .dtype()
+                    .storage_size_in_bytes(op.output.elem_count()),
+            )?;
+            match dtype {
+                QuantizedDType::Q8_0 => crate::hip::moe_gemm_gguf_q8_0_f32(
+                    op.input.buffer(),
+                    op.weights,
+                    op.sorted_token_ids.buffer(),
+                    op.expert_ids.buffer(),
+                    op.topk_weights.as_ref().map(TensorArg::buffer),
+                    &dst,
+                    op.num_experts,
+                    op.topk,
+                    op.size_m,
+                    op.size_n,
+                    op.size_k,
+                )?,
+                QuantizedDType::Q4K => crate::hip::moe_gemm_gguf_q4k_f32(
+                    op.input.buffer(),
+                    op.weights,
+                    op.sorted_token_ids.buffer(),
+                    op.expert_ids.buffer(),
+                    op.topk_weights.as_ref().map(TensorArg::buffer),
+                    &dst,
+                    op.num_experts,
+                    op.topk,
+                    op.size_m,
+                    op.size_n,
+                    op.size_k,
+                )?,
+                QuantizedDType::Q6K => crate::hip::moe_gemm_gguf_q6k_f32(
+                    op.input.buffer(),
+                    op.weights,
+                    op.sorted_token_ids.buffer(),
+                    op.expert_ids.buffer(),
+                    op.topk_weights.as_ref().map(TensorArg::buffer),
+                    &dst,
+                    op.num_experts,
+                    op.topk,
+                    op.size_m,
+                    op.size_n,
+                    op.size_k,
+                )?,
+                QuantizedDType::Q5_0 => unreachable!(),
             }
             Ok(Some(dst))
         }
@@ -3563,7 +3756,7 @@ pub mod tensor {
     fn is_contiguous(layout: &LayoutArg) -> bool {
         let mut expected = 1usize;
         for (&dim, &stride) in layout.dims().iter().zip(layout.stride()).rev() {
-            if stride != expected {
+            if dim > 1 && stride != expected {
                 return false;
             }
             expected = expected.saturating_mul(dim);

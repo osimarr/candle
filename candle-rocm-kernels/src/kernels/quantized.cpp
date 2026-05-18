@@ -38,6 +38,8 @@ static_assert(sizeof(BlockQ6K) == 210);
 
 constexpr unsigned int QMATMUL_THREADS_PER_ROW = 64;
 constexpr unsigned int QMATMUL_ROWS_PER_BLOCK = 4;
+constexpr unsigned int MOE_GGUF_THREADS_PER_ROW = 64;
+constexpr unsigned int MOE_GGUF_ROWS_PER_BLOCK = 4;
 
 __device__ inline uint32_t read_u32_le(const uint8_t* src) {
     return static_cast<uint32_t>(src[0]) |
@@ -187,6 +189,66 @@ __global__ void qmatmul_t_f32_kernel(
     }
 }
 
+template <typename Block, size_t BLOCK_SIZE, typename Dequant>
+__global__ void moe_gemm_gguf_f32_kernel(
+    const float* input,
+    const uint8_t* weights,
+    const uint32_t* sorted_token_ids,
+    const uint32_t* expert_ids,
+    const float* topk_weights,
+    float* dst,
+    size_t num_experts,
+    size_t topk,
+    size_t size_m,
+    size_t size_n,
+    size_t size_k,
+    size_t elem_count,
+    Dequant dequant) {
+    const size_t output_index = blockIdx.x * MOE_GGUF_ROWS_PER_BLOCK + threadIdx.y;
+    const bool active = output_index < elem_count;
+    float acc = 0.0f;
+    uint32_t token_id = 0;
+    size_t out_col = 0;
+
+    if (active) {
+        const size_t m_idx = output_index / size_n;
+        out_col = output_index % size_n;
+        token_id = sorted_token_ids[m_idx];
+        const uint32_t expert = expert_ids[m_idx];
+
+        if (expert < num_experts) {
+            const size_t blocks_per_row = size_k / BLOCK_SIZE;
+            const size_t expert_offset =
+                static_cast<size_t>(expert) * size_n * blocks_per_row;
+            const Block* row_blocks =
+                reinterpret_cast<const Block*>(weights) + expert_offset + out_col * blocks_per_row;
+            const size_t input_row = topk_weights == nullptr ? token_id / topk : token_id;
+            const float* input_row_ptr = input + input_row * size_k;
+
+            for (size_t inner = threadIdx.x; inner < size_k; inner += MOE_GGUF_THREADS_PER_ROW) {
+                acc += dequant(row_blocks, inner) * input_row_ptr[inner];
+            }
+        }
+    }
+
+    __shared__ float partial[MOE_GGUF_ROWS_PER_BLOCK][MOE_GGUF_THREADS_PER_ROW];
+    partial[threadIdx.y][threadIdx.x] = acc;
+    __syncthreads();
+
+    for (unsigned int stride = MOE_GGUF_THREADS_PER_ROW / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.y][threadIdx.x] += partial[threadIdx.y][threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (active && threadIdx.x == 0) {
+        const float scale = topk_weights == nullptr ? 1.0f : topk_weights[token_id];
+        dst[static_cast<size_t>(token_id) * size_n + out_col] =
+            partial[threadIdx.y][0] * scale;
+    }
+}
+
 struct DequantQ5_0 {
     __device__ float operator()(const BlockQ5_0* blocks, size_t inner) const {
         return dequant_q5_0(blocks, inner);
@@ -274,6 +336,55 @@ int launch_qmatmul_t_f32(
             elem_count,
             dequant);
     }
+    return check_last_launch_error(op);
+}
+
+template <typename Block, size_t BLOCK_SIZE, typename Dequant>
+int launch_moe_gemm_gguf_f32(
+    const char* op,
+    int ordinal,
+    const float* input,
+    const uint8_t* weights,
+    const uint32_t* sorted_token_ids,
+    const uint32_t* expert_ids,
+    const float* topk_weights,
+    float* dst,
+    size_t num_experts,
+    size_t topk,
+    size_t size_m,
+    size_t size_n,
+    size_t size_k,
+    Dequant dequant) {
+    const size_t elem_count = size_m * size_n;
+    int rc = select_device(ordinal);
+    if (rc != 0 || elem_count == 0) {
+        return rc;
+    }
+    if (topk == 0 || size_k % BLOCK_SIZE != 0) {
+        return set_error(op, hipErrorInvalidValue);
+    }
+    const dim3 grid(static_cast<unsigned int>(
+        (elem_count + MOE_GGUF_ROWS_PER_BLOCK - 1) / MOE_GGUF_ROWS_PER_BLOCK));
+    const dim3 block(MOE_GGUF_THREADS_PER_ROW, MOE_GGUF_ROWS_PER_BLOCK);
+    hipLaunchKernelGGL(
+        (moe_gemm_gguf_f32_kernel<Block, BLOCK_SIZE, Dequant>),
+        grid,
+        block,
+        0,
+        0,
+        input,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        topk_weights,
+        dst,
+        num_experts,
+        topk,
+        size_m,
+        size_n,
+        size_k,
+        elem_count,
+        dequant);
     return check_last_launch_error(op);
 }
 
@@ -388,5 +499,95 @@ extern "C" int hip_qmatmul_t_q6k_f32(
         batch_size,
         nrows,
         ncols,
+        DequantQ6K{});
+}
+
+extern "C" int hip_moe_gemm_gguf_q8_0_f32(
+    int ordinal,
+    const float* input,
+    const uint8_t* weights,
+    const uint32_t* sorted_token_ids,
+    const uint32_t* expert_ids,
+    const float* topk_weights,
+    float* dst,
+    size_t num_experts,
+    size_t topk,
+    size_t size_m,
+    size_t size_n,
+    size_t size_k) {
+    return launch_moe_gemm_gguf_f32<BlockQ8_0, QK8_0>(
+        "moe_gemm_gguf_q8_0_f32",
+        ordinal,
+        input,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        topk_weights,
+        dst,
+        num_experts,
+        topk,
+        size_m,
+        size_n,
+        size_k,
+        DequantQ8_0{});
+}
+
+extern "C" int hip_moe_gemm_gguf_q4k_f32(
+    int ordinal,
+    const float* input,
+    const uint8_t* weights,
+    const uint32_t* sorted_token_ids,
+    const uint32_t* expert_ids,
+    const float* topk_weights,
+    float* dst,
+    size_t num_experts,
+    size_t topk,
+    size_t size_m,
+    size_t size_n,
+    size_t size_k) {
+    return launch_moe_gemm_gguf_f32<BlockQ4K, QK_K>(
+        "moe_gemm_gguf_q4k_f32",
+        ordinal,
+        input,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        topk_weights,
+        dst,
+        num_experts,
+        topk,
+        size_m,
+        size_n,
+        size_k,
+        DequantQ4K{});
+}
+
+extern "C" int hip_moe_gemm_gguf_q6k_f32(
+    int ordinal,
+    const float* input,
+    const uint8_t* weights,
+    const uint32_t* sorted_token_ids,
+    const uint32_t* expert_ids,
+    const float* topk_weights,
+    float* dst,
+    size_t num_experts,
+    size_t topk,
+    size_t size_m,
+    size_t size_n,
+    size_t size_k) {
+    return launch_moe_gemm_gguf_f32<BlockQ6K, QK_K>(
+        "moe_gemm_gguf_q6k_f32",
+        ordinal,
+        input,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        topk_weights,
+        dst,
+        num_experts,
+        topk,
+        size_m,
+        size_n,
+        size_k,
         DequantQ6K{});
 }

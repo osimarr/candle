@@ -729,6 +729,68 @@ impl QTensor {
         }
     }
 
+    #[cfg(feature = "rocm")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_gemm_gguf_rocm(
+        &self,
+        input: &Tensor,
+        topk_weights: &Option<Tensor>,
+        sorted_token_ids: &Tensor,
+        expert_ids: &Tensor,
+        topk: usize,
+    ) -> Result<Tensor> {
+        let QStorage::Rocm(weights) = &self.storage else {
+            crate::bail!("moe_gemm_gguf_rocm requires ROCm quantized weights")
+        };
+
+        let (input_storage, input_layout) = input.storage_and_layout();
+        let input_storage = match &*input_storage {
+            Storage::Rocm(storage) => storage,
+            _ => crate::bail!("moe_gemm_gguf_rocm input must be a ROCm tensor"),
+        };
+        let (sorted_token_ids_storage, sorted_token_ids_layout) =
+            sorted_token_ids.storage_and_layout();
+        let sorted_token_ids_storage = match &*sorted_token_ids_storage {
+            Storage::Rocm(storage) => storage,
+            _ => crate::bail!("moe_gemm_gguf_rocm sorted_token_ids must be a ROCm tensor"),
+        };
+        let (expert_ids_storage, expert_ids_layout) = expert_ids.storage_and_layout();
+        let expert_ids_storage = match &*expert_ids_storage {
+            Storage::Rocm(storage) => storage,
+            _ => crate::bail!("moe_gemm_gguf_rocm expert_ids must be a ROCm tensor"),
+        };
+
+        let topk_weights_storage_and_layout = match topk_weights {
+            Some(topk_weights) => Some(topk_weights.storage_and_layout()),
+            None => None,
+        };
+        let topk_weights = match &topk_weights_storage_and_layout {
+            Some((topk_weights_storage, topk_weights_layout)) => match &**topk_weights_storage {
+                Storage::Rocm(storage) => Some((storage, *topk_weights_layout)),
+                _ => crate::bail!("moe_gemm_gguf_rocm topk_weights must be a ROCm tensor"),
+            },
+            None => None,
+        };
+
+        let (storage, out_shape) = weights.moe_gemm_gguf(
+            &self.shape,
+            input_storage,
+            input_layout,
+            topk_weights,
+            sorted_token_ids_storage,
+            sorted_token_ids_layout,
+            expert_ids_storage,
+            expert_ids_layout,
+            topk,
+        )?;
+        Ok(crate::tensor::from_storage(
+            Storage::Rocm(storage),
+            out_shape,
+            crate::op::BackpropOp::none(),
+            false,
+        ))
+    }
+
     pub fn device_ptr(&self) -> Result<*const u8> {
         match &self.storage {
             QStorage::Cuda(storage) => storage.device_ptr(),

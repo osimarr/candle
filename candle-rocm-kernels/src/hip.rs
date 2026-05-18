@@ -628,6 +628,48 @@ unsafe extern "C" {
         nrows: usize,
         ncols: usize,
     ) -> c_int;
+    fn hip_moe_gemm_gguf_q8_0_f32(
+        ordinal: c_int,
+        input: *const f32,
+        weights: *const u8,
+        sorted_token_ids: *const u32,
+        expert_ids: *const u32,
+        topk_weights: *const f32,
+        dst: *mut f32,
+        num_experts: usize,
+        topk: usize,
+        size_m: usize,
+        size_n: usize,
+        size_k: usize,
+    ) -> c_int;
+    fn hip_moe_gemm_gguf_q4k_f32(
+        ordinal: c_int,
+        input: *const f32,
+        weights: *const u8,
+        sorted_token_ids: *const u32,
+        expert_ids: *const u32,
+        topk_weights: *const f32,
+        dst: *mut f32,
+        num_experts: usize,
+        topk: usize,
+        size_m: usize,
+        size_n: usize,
+        size_k: usize,
+    ) -> c_int;
+    fn hip_moe_gemm_gguf_q6k_f32(
+        ordinal: c_int,
+        input: *const f32,
+        weights: *const u8,
+        sorted_token_ids: *const u32,
+        expert_ids: *const u32,
+        topk_weights: *const f32,
+        dst: *mut f32,
+        num_experts: usize,
+        topk: usize,
+        size_m: usize,
+        size_n: usize,
+        size_k: usize,
+    ) -> c_int;
     fn hip_index_select_u32_f32(
         ordinal: c_int,
         src: *const f32,
@@ -2935,6 +2977,120 @@ pub(crate) fn qmatmul_t_q6k_f32(
             )
         },
         "qmatmul_t_q6k_f32",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_gemm_gguf_q8_0_f32(
+    input: &Buffer,
+    weights: &Buffer,
+    sorted_token_ids: &Buffer,
+    expert_ids: &Buffer,
+    topk_weights: Option<&Buffer>,
+    dst: &Buffer,
+    num_experts: usize,
+    topk: usize,
+    size_m: usize,
+    size_n: usize,
+    size_k: usize,
+) -> Result<()> {
+    let topk_weights = topk_weights
+        .map(|buffer| buffer.device_ptr().cast::<f32>() as *const f32)
+        .unwrap_or(ptr::null());
+    check(
+        unsafe {
+            hip_moe_gemm_gguf_q8_0_f32(
+                ordinal_to_c_int(weights.device_ordinal())?,
+                input.device_ptr().cast::<f32>(),
+                weights.device_ptr().cast::<u8>(),
+                sorted_token_ids.device_ptr().cast::<u32>(),
+                expert_ids.device_ptr().cast::<u32>(),
+                topk_weights,
+                dst.device_ptr().cast::<f32>(),
+                num_experts,
+                topk,
+                size_m,
+                size_n,
+                size_k,
+            )
+        },
+        "moe_gemm_gguf_q8_0_f32",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_gemm_gguf_q4k_f32(
+    input: &Buffer,
+    weights: &Buffer,
+    sorted_token_ids: &Buffer,
+    expert_ids: &Buffer,
+    topk_weights: Option<&Buffer>,
+    dst: &Buffer,
+    num_experts: usize,
+    topk: usize,
+    size_m: usize,
+    size_n: usize,
+    size_k: usize,
+) -> Result<()> {
+    let topk_weights = topk_weights
+        .map(|buffer| buffer.device_ptr().cast::<f32>() as *const f32)
+        .unwrap_or(ptr::null());
+    check(
+        unsafe {
+            hip_moe_gemm_gguf_q4k_f32(
+                ordinal_to_c_int(weights.device_ordinal())?,
+                input.device_ptr().cast::<f32>(),
+                weights.device_ptr().cast::<u8>(),
+                sorted_token_ids.device_ptr().cast::<u32>(),
+                expert_ids.device_ptr().cast::<u32>(),
+                topk_weights,
+                dst.device_ptr().cast::<f32>(),
+                num_experts,
+                topk,
+                size_m,
+                size_n,
+                size_k,
+            )
+        },
+        "moe_gemm_gguf_q4k_f32",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_gemm_gguf_q6k_f32(
+    input: &Buffer,
+    weights: &Buffer,
+    sorted_token_ids: &Buffer,
+    expert_ids: &Buffer,
+    topk_weights: Option<&Buffer>,
+    dst: &Buffer,
+    num_experts: usize,
+    topk: usize,
+    size_m: usize,
+    size_n: usize,
+    size_k: usize,
+) -> Result<()> {
+    let topk_weights = topk_weights
+        .map(|buffer| buffer.device_ptr().cast::<f32>() as *const f32)
+        .unwrap_or(ptr::null());
+    check(
+        unsafe {
+            hip_moe_gemm_gguf_q6k_f32(
+                ordinal_to_c_int(weights.device_ordinal())?,
+                input.device_ptr().cast::<f32>(),
+                weights.device_ptr().cast::<u8>(),
+                sorted_token_ids.device_ptr().cast::<u32>(),
+                expert_ids.device_ptr().cast::<u32>(),
+                topk_weights,
+                dst.device_ptr().cast::<f32>(),
+                num_experts,
+                topk,
+                size_m,
+                size_n,
+                size_k,
+            )
+        },
+        "moe_gemm_gguf_q6k_f32",
     )
 }
 

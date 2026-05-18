@@ -336,7 +336,29 @@ pub fn moe_gemm_gguf(
     }
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+#[allow(clippy::too_many_arguments)]
+pub fn moe_gemm_gguf(
+    input: &Tensor,
+    weights: &QTensor,
+    topk_weights: &Option<Tensor>,
+    sorted_token_ids: &Tensor,
+    experts_ids: &Tensor,
+    topk: usize,
+    _is_prefill: bool,
+    _dtype: candle::DType,
+) -> Result<Tensor> {
+    if input.dtype() != candle::DType::F32 {
+        candle::bail!("moe_gemm_gguf only accepts f32 inputs")
+    }
+    let input = input.contiguous()?;
+    let sorted_token_ids = sorted_token_ids.contiguous()?;
+    let experts_ids = experts_ids.contiguous()?;
+    let topk_weights = topk_weights.as_ref().map(Tensor::contiguous).transpose()?;
+    weights.moe_gemm_gguf_rocm(&input, &topk_weights, &sorted_token_ids, &experts_ids, topk)
+}
+
+#[cfg(all(not(feature = "cuda"), not(feature = "rocm")))]
 #[allow(clippy::too_many_arguments)]
 pub fn moe_gemm_gguf(
     _: &Tensor,

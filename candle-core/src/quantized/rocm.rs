@@ -277,6 +277,129 @@ impl QRocmStorage {
             .map(|storage| (storage, shape))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_gemm_gguf(
+        &self,
+        self_shape: &Shape,
+        input: &RocmStorage,
+        input_layout: &Layout,
+        topk_weights: Option<(&RocmStorage, &Layout)>,
+        sorted_token_ids: &RocmStorage,
+        sorted_token_ids_layout: &Layout,
+        expert_ids: &RocmStorage,
+        expert_ids_layout: &Layout,
+        topk: usize,
+    ) -> Result<(RocmStorage, Shape)> {
+        let (num_experts, size_n, size_k) = self_shape.dims3()?;
+        let (input_rows, input_k) = input_layout.shape().dims2()?;
+        if input_k != size_k {
+            crate::bail!(
+                "input and GGUF MoE weights last dim mismatch: input {input_k}, weights {size_k}"
+            )
+        }
+        if input.dtype() != DType::F32 {
+            crate::bail!("moe_gemm_gguf only accepts f32 inputs")
+        }
+        if topk == 0 {
+            crate::bail!("moe_gemm_gguf requires topk > 0")
+        }
+        check_contiguous_zero_offset(input_layout, "moe_gemm_gguf input")?;
+        check_contiguous_zero_offset(sorted_token_ids_layout, "moe_gemm_gguf sorted_token_ids")?;
+        check_contiguous_zero_offset(expert_ids_layout, "moe_gemm_gguf expert_ids")?;
+
+        let size_m = if let Some((topk_weights, topk_weights_layout)) = topk_weights {
+            if topk_weights.dtype() != DType::F32 {
+                crate::bail!("moe_gemm_gguf topk_weights must be f32")
+            }
+            check_contiguous_zero_offset(topk_weights_layout, "moe_gemm_gguf topk_weights")?;
+            let topk_weights_elems = topk_weights_layout.shape().elem_count();
+            if topk_weights_elems != input_rows {
+                crate::bail!(
+                    "invalid moe_gemm_gguf topk_weights shape: expected {input_rows} elems, got {topk_weights_elems}"
+                )
+            }
+            input_rows
+        } else {
+            input_rows
+                .checked_mul(topk)
+                .ok_or_else(|| crate::Error::Msg("moe_gemm_gguf M dimension overflow".into()))?
+        };
+        let sorted_elems = sorted_token_ids_layout.shape().elem_count();
+        let expert_elems = expert_ids_layout.shape().elem_count();
+        if sorted_token_ids.dtype() != DType::U32 || expert_ids.dtype() != DType::U32 {
+            crate::bail!("moe_gemm_gguf routing tensors must be u32")
+        }
+        if sorted_elems != size_m || expert_elems != size_m {
+            crate::bail!(
+                "invalid moe_gemm_gguf routing shape: expected {size_m} elems, got sorted {sorted_elems}, experts {expert_elems}"
+            )
+        }
+
+        let QRocmStorageData::Raw {
+            buffer,
+            elem_count: storage_elem_count,
+        } = &self.storage
+        else {
+            crate::bail!(
+                "moe_gemm_gguf requires raw quantized ROCm storage, got {:?}",
+                self.dtype
+            )
+        };
+        if *storage_elem_count != self_shape.elem_count() {
+            crate::bail!(
+                "invalid {:?} moe_gemm_gguf elem count: storage has {storage_elem_count}, requested {}",
+                self.dtype,
+                self_shape.elem_count()
+            )
+        }
+        let Some(dtype) = kernel_quantized_dtype(self.dtype) else {
+            crate::bail!(
+                "moe_gemm_gguf does not support {:?} ROCm weights",
+                self.dtype
+            )
+        };
+
+        let input = input.tensor_arg()?;
+        let sorted_token_ids = sorted_token_ids.tensor_arg()?;
+        let expert_ids = expert_ids.tensor_arg()?;
+        let topk_weights = match topk_weights {
+            Some((weights, _)) => Some(weights.tensor_arg()?),
+            None => None,
+        };
+        let op = kernels::quantized::MoeGemmGgufOp {
+            name: "moe_gemm_gguf",
+            device: self.device.kernel_device(),
+            weights: buffer,
+            input,
+            sorted_token_ids,
+            expert_ids,
+            topk_weights,
+            output: kernels::TensorOutput::new(kernels::KernelDType::F32, size_m * size_n),
+            num_experts,
+            topk,
+            size_m,
+            size_n,
+            size_k,
+        };
+        let Some(buffer) =
+            kernels::quantized::try_moe_gemm_gguf(dtype, &op).map_err(crate::Error::from)?
+        else {
+            crate::bail!(
+                "moe_gemm_gguf does not support {:?} ROCm weights",
+                self.dtype
+            )
+        };
+        let out_shape = Shape::from((size_m, size_n));
+        RocmStorage::from_buffer(
+            buffer,
+            self.device.clone(),
+            DType::F32,
+            size_m * size_n,
+            "moe_gemm_gguf",
+        )
+        .map(|storage| (storage, out_shape))
+    }
+
     pub fn data(&self) -> Result<Cow<'_, [u8]>> {
         let op = self.op("data")?;
         kernels::quantized::call_data(op, || Ok(Cow::Owned(self.raw_data()?)))
@@ -400,6 +523,13 @@ fn kernel_quantized_dtype(dtype: GgmlDType) -> Option<kernels::quantized::Quanti
         GgmlDType::Q6K => Some(kernels::quantized::QuantizedDType::Q6K),
         _ => None,
     }
+}
+
+fn check_contiguous_zero_offset(layout: &Layout, op: &'static str) -> Result<()> {
+    if !layout.is_contiguous() || layout.start_offset() != 0 {
+        crate::bail!("{op} must be contiguous with zero start offset")
+    }
+    Ok(())
 }
 
 fn supports_native_float16(dtype: GgmlDType) -> bool {
